@@ -1,0 +1,53 @@
+# --- macOS ---
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# --- editors / IDEs ---
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# --- secrets & credentials (this project handles live targets: never commit these) ---
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+secrets/
+credentials/
+*.local.yaml
+*.local.yml
+scope.local.*
+
+# --- scan output / evidence ---
+output/
+results/
+reports/
+evidence/
+*.nessus
+*.burp
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# --- Node ---
+node_modules/
+dist/
+build/
+*.log
+
+# --- Go ---
+/karst
+/karst-*
