@@ -6,12 +6,6 @@ Karst turns an authorized security assessment into a reproducible pipeline — r
 
 > **Status: early development.** There is no usable release yet. The architecture is still being decided; see `docs/` once it exists.
 
-## Why "Karst"
-
-A karst landscape is formed by water seeping through soluble rock. No force, no breaching — water finds the fissures and follows them until it reaches the aquifer.
-
-That is the model Karst follows: map the surface, find the cracks, follow them. Reconnaissance is the water, and the report is where it comes out.
-
 ## Authorized use
 
 Karst is built **exclusively** for security testing of systems you own or have explicit written authorization to test.
