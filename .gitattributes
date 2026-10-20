@@ -1,0 +1,21 @@
+# Normalise all text files to LF, in the repository and the working tree.
+#
+# Why this is not cosmetic: the acceptance harness hashes source files
+# (sha256 of every file under src/, tests/, scripts/, config/, knowledge/
+# plus pyproject.toml). Without a fixed eol policy a Windows checkout is
+# CRLF while a Linux checkout is LF, so the same commit produces different
+# hashes on the two machines and cross-machine comparison fails.
+* text=auto eol=lf
+
+# Keep genuinely binary assets out of the text conversion.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.pdf binary
+*.zip binary
+*.gz binary
+*.whl binary
+*.sqlite binary
+*.db binary
