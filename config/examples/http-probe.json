@@ -1,0 +1,16 @@
+{
+  "profile": "karst-http-probe/1",
+  "entrypoints": ["http://127.0.0.1:8765/"],
+  "origins": [{"origin": "http://127.0.0.1:8765", "path_prefixes": ["/"]}],
+  "allowed_cidrs": ["127.0.0.1/32"],
+  "denied_cidrs": [],
+  "identities": [],
+  "limits": {
+    "max_requests": 10,
+    "max_response_bytes": 65536,
+    "max_total_response_bytes": 262144,
+    "timeout_seconds": 5,
+    "wall_seconds": 30,
+    "max_redirects": 2
+  }
+}

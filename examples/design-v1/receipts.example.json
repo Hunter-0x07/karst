@@ -1,0 +1,74 @@
+{
+  "example_only": true,
+  "endpoint": "research.publish",
+  "accepted": {
+    "request_id": "request_example_001",
+    "proposal_digest": "4bfd869b8d664418189d0bed6ccec47bc5df64812cf96fc4ade5e8bd535dea35",
+    "status": "accepted",
+    "result_ref": {
+      "kind": "result",
+      "id": "result_example_001",
+      "version": 1
+    },
+    "local_ref_map": {
+      "observation_read": {
+        "kind": "observation",
+        "id": "observation_example_001",
+        "version": 1
+      },
+      "candidate_access": {
+        "kind": "candidate",
+        "id": "candidate_example_001",
+        "version": 1
+      }
+    },
+    "state_version": 12,
+    "error": null
+  },
+  "same_request_replay": {
+    "request_id": "request_example_001",
+    "proposal_digest": "4bfd869b8d664418189d0bed6ccec47bc5df64812cf96fc4ade5e8bd535dea35",
+    "status": "duplicate",
+    "result_ref": {
+      "kind": "result",
+      "id": "result_example_001",
+      "version": 1
+    },
+    "local_ref_map": {
+      "observation_read": {
+        "kind": "observation",
+        "id": "observation_example_001",
+        "version": 1
+      },
+      "candidate_access": {
+        "kind": "candidate",
+        "id": "candidate_example_001",
+        "version": 1
+      }
+    },
+    "state_version": 12,
+    "error": null
+  },
+  "same_key_different_content": {
+    "request_id": "request_example_001",
+    "proposal_digest": "35dd9c50b327fe9822e19b1cee1d6bd90ef9622b84b4f1d2de70d37d8ad5da26",
+    "status": "rejected",
+    "result_ref": null,
+    "local_ref_map": {},
+    "state_version": 12,
+    "error": {
+      "code": "IDEMPOTENCY_CONFLICT",
+      "path": "$.request_id",
+      "message": "同一请求键已绑定另一内容；不重复写入。"
+    }
+  },
+  "different_content_override": {
+    "path": "$.payload.summary",
+    "value": "另一份内容"
+  },
+  "effect": {
+    "task_remains_running": true,
+    "candidate_state": "open",
+    "finding_created": false
+  }
+}

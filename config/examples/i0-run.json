@@ -1,0 +1,139 @@
+{
+  "schema_version": "karst-i0-launch/1",
+  "briefing": "调查这个采购演示站。依据入口导航，分别以 Alice 和 Bob 身份查看各自目录和订单详情，整理实际用户、订单编号和 reconciliation_code。至少增量发布一次已取得的观察，然后继续实际调查；最终用证据引用交付两人的完整事实。完整 reconciliation_code 位于长响应后段，请读取证据原件视图。这是正常业务核对，不是漏洞测试。",
+  "spec": {
+    "entrypoints": [
+      "http://127.0.0.1:8765/"
+    ],
+    "scope": {
+      "web_origins": [
+        {
+          "origin": "http://127.0.0.1:8765",
+          "path_prefixes": [
+            "/"
+          ]
+        }
+      ],
+      "network_targets": [
+        {
+          "host": "127.0.0.1",
+          "ports": [
+            8765
+          ],
+          "protocols": [
+            "http"
+          ],
+          "vantage_keys": [
+            "workstation"
+          ]
+        }
+      ],
+      "denied_targets": [],
+      "default_action": "deny"
+    },
+    "identity_refs": [],
+    "objectives": {
+      "discover_security_issues": false,
+      "investigate_further": false,
+      "depth_goals": []
+    },
+    "policy": {
+      "allowed_impacts": [
+        "observe",
+        "read_authorized_data"
+      ],
+      "unknown_impact": "classify_or_deny",
+      "identity_policy": {
+        "allowed_identity_refs": [],
+        "auth_modes": [
+          "managed",
+          "anonymous"
+        ]
+      },
+      "tool_profile_ref": "registry:i0-get-v1",
+      "network": {
+        "egress_profile_ref": "egress:i0-launch-v1",
+        "requests_per_second": 2,
+        "max_connections": 1
+      },
+      "mutation_policy": {
+        "shared_writes": "exclusive",
+        "test_resources_only": true
+      },
+      "cleanup": {
+        "enabled": false,
+        "allowed_impacts": [],
+        "reserved_seconds": 0,
+        "reserved_tool_starts": 0
+      }
+    },
+    "budget": {
+      "model_requests": 12,
+      "input_tokens": 1000000,
+      "output_tokens": 49152,
+      "http_requests": 30,
+      "network_connections": 30,
+      "network_bytes": 268435456,
+      "tool_starts": 60,
+      "wall_seconds": 900,
+      "cost_limit": null
+    },
+    "scheduling": {
+      "max_workers": 1,
+      "max_ready": 1,
+      "max_same_lane": 1,
+      "aging_rounds": 1,
+      "max_attempts_per_fingerprint": 1,
+      "max_corrections": 2,
+      "per_task_budget": {
+        "model_requests": 12,
+        "input_tokens": 1000000,
+        "output_tokens": 49152,
+        "http_requests": 30,
+        "network_connections": 30,
+        "network_bytes": 268435456,
+        "tool_starts": 60,
+        "wall_seconds": 900,
+        "cost_limit": null
+      }
+    },
+    "stop_policy": {
+      "stop_on_goal": false,
+      "coverage_contract": null,
+      "user_stop_conditions": []
+    },
+    "initial_context_refs": [],
+    "runtime_profile": {
+      "mode": "live",
+      "model_config_ref": "config:i0-gateway-v1",
+      "tool_profile_ref": "registry:i0-get-v1",
+      "support_matrix_ref": "support:i0-v1",
+      "dependency_lock_ref": "lock:stdlib-3.12-v1",
+      "policy_version": "i0-v1"
+    }
+  },
+  "identities": [
+    {
+      "name": "alice",
+      "origin": "http://127.0.0.1:8765",
+      "bearer_env": "KARST_I0_ALICE"
+    },
+    {
+      "name": "bob",
+      "origin": "http://127.0.0.1:8765",
+      "bearer_env": "KARST_I0_BOB"
+    }
+  ],
+  "execution": {
+    "allowed_cidrs": [
+      "127.0.0.1/32"
+    ],
+    "denied_cidrs": [],
+    "http_timeout_seconds": 10,
+    "max_response_bytes": 65536,
+    "max_redirects": 2,
+    "preview_bytes": 768,
+    "max_read_bytes": 8192,
+    "max_total_read_bytes": 131072
+  }
+}

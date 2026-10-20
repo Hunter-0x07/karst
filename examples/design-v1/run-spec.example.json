@@ -1,0 +1,192 @@
+{
+  "example_only": true,
+  "schema_version": "karst-design/1",
+  "note": "合成配置。注册表、模型和依赖引用均为占位；不具备可执行条件。主机目标保留并标注条件缺口；当前工具不支持，Web 调查继续。",
+  "spec": {
+    "entrypoints": [
+      "https://portal.example.test/"
+    ],
+    "scope": {
+      "web_origins": [
+        {
+          "origin": "https://portal.example.test",
+          "path_prefixes": [
+            "/"
+          ]
+        }
+      ],
+      "network_targets": [
+        {
+          "host": "portal.example.test",
+          "ports": [
+            443
+          ],
+          "protocols": [
+            "https"
+          ],
+          "vantage_keys": [
+            "workstation"
+          ]
+        },
+        {
+          "host": "app-host.example.test",
+          "ports": [
+            443
+          ],
+          "protocols": [
+            "https"
+          ],
+          "vantage_keys": [
+            "workstation"
+          ]
+        }
+      ],
+      "denied_targets": [],
+      "default_action": "deny"
+    },
+    "identity_refs": [
+      {
+        "kind": "identity",
+        "id": "identity_a",
+        "version": 1
+      },
+      {
+        "kind": "identity",
+        "id": "identity_b",
+        "version": 1
+      }
+    ],
+    "objectives": {
+      "discover_security_issues": true,
+      "investigate_further": true,
+      "depth_goals": [
+        {
+          "key": "target-host-admin",
+          "resource_selector": {
+            "kind": "asset",
+            "canonical_key": "host:app-host.example.test"
+          },
+          "required_actions": [
+            "host.execute",
+            "host.admin"
+          ],
+          "required_conditions": [
+            {
+              "type": "environment_state",
+              "refs": [
+                {
+                  "kind": "asset",
+                  "id": "asset_host",
+                  "version": 1
+                }
+              ],
+              "expected": {
+                "execution_location": "target-host",
+                "isolation_boundary": "host"
+              },
+              "rationale": "目标是指定主机的能力，不能用应用或容器身份替代。"
+            }
+          ],
+          "require_new_capability": true
+        }
+      ]
+    },
+    "policy": {
+      "allowed_impacts": [
+        "observe",
+        "read_authorized_data",
+        "create_test_resource",
+        "modify_test_resource",
+        "cleanup_test_resource"
+      ],
+      "unknown_impact": "classify_or_deny",
+      "identity_policy": {
+        "allowed_identity_refs": [
+          {
+            "kind": "identity",
+            "id": "identity_a",
+            "version": 1
+          },
+          {
+            "kind": "identity",
+            "id": "identity_b",
+            "version": 1
+          }
+        ],
+        "auth_modes": [
+          "managed",
+          "anonymous",
+          "declared_variant"
+        ]
+      },
+      "tool_profile_ref": "registry:example-web-v1",
+      "network": {
+        "egress_profile_ref": "egress:example-web-v1",
+        "requests_per_second": 2,
+        "max_connections": 4
+      },
+      "mutation_policy": {
+        "shared_writes": "exclusive",
+        "test_resources_only": true
+      },
+      "cleanup": {
+        "enabled": true,
+        "allowed_impacts": [
+          "cleanup_test_resource"
+        ],
+        "reserved_seconds": 60,
+        "reserved_tool_starts": 10
+      }
+    },
+    "budget": {
+      "model_requests": 120,
+      "input_tokens": 1200000,
+      "output_tokens": 100000,
+      "http_requests": 1000,
+      "network_connections": 2000,
+      "network_bytes": 104857600,
+      "tool_starts": 300,
+      "wall_seconds": 1800,
+      "cost_limit": null
+    },
+    "scheduling": {
+      "max_workers": 1,
+      "max_ready": 32,
+      "max_same_lane": 3,
+      "aging_rounds": 4,
+      "max_attempts_per_fingerprint": 2,
+      "max_corrections": 2,
+      "per_task_budget": {
+        "model_requests": 20,
+        "input_tokens": 200000,
+        "output_tokens": 15000,
+        "http_requests": 100,
+        "network_connections": 200,
+        "network_bytes": 10485760,
+        "tool_starts": 40,
+        "wall_seconds": 300,
+        "cost_limit": null
+      }
+    },
+    "stop_policy": {
+      "stop_on_goal": false,
+      "coverage_contract": null,
+      "user_stop_conditions": []
+    },
+    "initial_context_refs": [
+      {
+        "kind": "security_rule",
+        "id": "rule_tenant_private",
+        "version": 1
+      }
+    ],
+    "runtime_profile": {
+      "mode": "live",
+      "model_config_ref": "config:example-model-v1",
+      "tool_profile_ref": "registry:example-web-v1",
+      "support_matrix_ref": "support:example-i1-v1",
+      "dependency_lock_ref": "lock:example-build-v1",
+      "policy_version": "example-policy-v1"
+    }
+  }
+}

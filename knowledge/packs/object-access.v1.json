@@ -1,0 +1,20 @@
+{
+  "schema_version": "answer-method-design/1",
+  "id": "object-access-boundary",
+  "version": 1,
+  "status": "specified_not_integrated",
+  "question": "Does access to a business object violate an evidenced ownership or sharing rule?",
+  "applies_when": ["A normally discoverable object and its relevant operation are known", "Identity and object context can be established"],
+  "initial_observations": ["Normal navigation and object references", "Actual subject for each supplied session", "Ownership, tenant and sharing rules with sources"],
+  "alternative_explanations": ["Explicit legitimate sharing", "Public object", "Expired or incorrectly bound identity", "Cached or unrelated response", "Different object than the one under investigation"],
+  "experiments": [
+    {"purpose": "Establish legitimate behavior", "requires": ["usable identity", "normally visible object"], "records": ["identity evidence", "object context", "response evidence"]},
+    {"purpose": "Distinguish a suspected access-boundary violation from sharing or identity confusion", "requires": ["supported applicable rule", "comparable object and operation", "separate identity contexts"], "records": ["control evidence", "comparison evidence", "actual accessed content or action", "remaining alternatives"]},
+    {"purpose": "Investigate new resources found in verified results", "requires": ["actual source evidence", "scope and identity checks", "current capability conditions"], "records": ["input-to-output dependency", "executed follow-up", "verified resulting access or resource"]}
+  ],
+  "candidate_requires": ["specific affected object and action", "supported applicable rule", "actual contrary behavior", "evidence references", "explicit missing conditions and alternatives"],
+  "review_requires": ["recheck identity, ownership and sharing conditions", "read original material", "perform meaningful independent control when feasible", "bind candidate claim revision", "explain impact and remaining uncertainty"],
+  "inconclusive_when": ["Unknown sharing rules", "Unverified identity", "Partial material cannot prove actual content", "Changed target state prevents interpretation"],
+  "stop_or_redirect_when": ["Decisive legitimate explanation", "Missing external prerequisite", "Budget exhausted", "No new distinguishing experiment within the remaining budget"],
+  "prohibitions": ["Do not infer a vulnerability from status code or response length alone", "Do not invent target routes or evaluation answers", "Do not treat supplied privileges as acquired capability", "Do not use this method to change scope or formal result state"]
+}

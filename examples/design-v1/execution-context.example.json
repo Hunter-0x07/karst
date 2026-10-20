@@ -1,0 +1,47 @@
+{
+  "example_only": true,
+  "format": "execution-context",
+  "note": "合成的 Host 内部上下文，不是持久领域记录、模型输入或 0.0.1 诊断配置。时间、引用及预算句柄均为说明值，不能执行。Grant 派生自同目录 RunSpec，只收窄到 portal，动态检查仍须执行。",
+  "reference_catalog": [
+    {"kind": "run", "id": "run_example_001", "version": 1},
+    {"kind": "task", "id": "task_research_001", "version": 1},
+    {"kind": "attempt", "id": "attempt_research_001", "version": 1},
+    {"kind": "identity", "id": "identity_a", "version": 1},
+    {"kind": "identity", "id": "identity_b", "version": 1}
+  ],
+  "context": {
+    "run_ref": {"kind": "run", "id": "run_example_001", "version": 1},
+    "task_ref": {"kind": "task", "id": "task_research_001", "version": 1},
+    "attempt_ref": {"kind": "attempt", "id": "attempt_research_001", "version": 1},
+    "config_version": 1,
+    "allowed_tools": ["http.request", "session.inspect"],
+    "identity_refs": [
+      {"kind": "identity", "id": "identity_a", "version": 1},
+      {"kind": "identity", "id": "identity_b", "version": 1}
+    ],
+    "budget_reservation": "reservation_example_001",
+    "lease_generation": 1,
+    "grant": {
+      "policy_version": "example-policy-v1",
+      "scope": {
+        "web_origins": [{"origin": "https://portal.example.test", "path_prefixes": ["/"]}],
+        "network_targets": [{"host": "portal.example.test", "ports": [443], "protocols": ["https"], "vantage_keys": ["workstation"]}],
+        "denied_targets": [],
+        "default_action": "deny"
+      },
+      "allowed_impacts": ["observe", "read_authorized_data"],
+      "identity_policy": {
+        "allowed_identity_refs": [
+          {"kind": "identity", "id": "identity_a", "version": 1},
+          {"kind": "identity", "id": "identity_b", "version": 1}
+        ],
+        "auth_modes": ["managed", "anonymous", "declared_variant"]
+      },
+      "network": {"egress_profile_ref": "egress:example-web-v1", "requests_per_second": 2, "max_connections": 4},
+      "mutation_policy": {"shared_writes": "exclusive", "test_resources_only": true},
+      "cleanup": {"enabled": false, "allowed_impacts": [], "reserved_seconds": 0, "reserved_tool_starts": 0},
+      "valid_until": "2026-10-19T00:05:00Z"
+    }
+  },
+  "budget_note": "reservation_example_001 仅表示程序账本中的预留句柄，不是真实预留或可被模型修改的剩余额度；有效期需受真实 Run/Task/租约期限限制。"
+}

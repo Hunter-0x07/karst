@@ -1,0 +1,230 @@
+{
+  "example_only": true,
+  "endpoint": "research.publish",
+  "note": "program_envelope 由运行时包裹；payload 才是受限模型提议。增量接收不会结束 Task。",
+  "program_envelope": {
+    "schema_version": "karst-design/1",
+    "request_id": "request_example_001",
+    "run_ref": {
+      "kind": "run",
+      "id": "run_example_001",
+      "version": 1
+    },
+    "task_ref": {
+      "kind": "task",
+      "id": "task_research_001",
+      "version": 1
+    },
+    "attempt_ref": {
+      "kind": "attempt",
+      "id": "attempt_research_001",
+      "version": 1
+    },
+    "expected_versions": [
+      {
+        "kind": "run",
+        "id": "run_example_001",
+        "version": 1
+      },
+      {
+        "kind": "task",
+        "id": "task_research_001",
+        "version": 1
+      },
+      {
+        "kind": "attempt",
+        "id": "attempt_research_001",
+        "version": 1
+      },
+      {
+        "kind": "session",
+        "id": "session_b",
+        "version": 1
+      },
+      {
+        "kind": "security_rule",
+        "id": "rule_tenant_private",
+        "version": 1
+      }
+    ],
+    "payload": {
+      "summary": "身份 B 读取测试对象的材料已登记；存在边界问题候选，尚需排除合法共享。",
+      "outcome": "partial",
+      "proposed_records": [
+        {
+          "local_ref": "observation_read",
+          "kind": "observation",
+          "data": {
+            "statement": "本次材料包含对象内容，使用身份 B 的会话；仅凭响应状态不能推出边界违反。",
+            "evidence_refs": [
+              {
+                "kind": "evidence",
+                "id": "evidence_read_001",
+                "version": 1
+              }
+            ],
+            "subject_refs": [
+              {
+                "kind": "identity",
+                "id": "identity_b",
+                "version": 1
+              },
+              {
+                "kind": "asset",
+                "id": "asset_document_42",
+                "version": 1
+              }
+            ],
+            "conditions": [
+              {
+                "type": "session_authenticated",
+                "refs": [
+                  {
+                    "kind": "session",
+                    "id": "session_b",
+                    "version": 1
+                  }
+                ],
+                "expected": {
+                  "generation": 1,
+                  "identity_ref": {
+                    "kind": "identity",
+                    "id": "identity_b",
+                    "version": 1
+                  }
+                },
+                "rationale": "对象访问必须绑定实际测试身份和当前会话代次。"
+              }
+            ],
+            "provenance": "agent_interpreted",
+            "contradicts_refs": []
+          }
+        },
+        {
+          "local_ref": "candidate_access",
+          "kind": "candidate",
+          "data": {
+            "claim": "身份 B 可能读取了按当前规则应对其隔离的测试对象。",
+            "affected_refs": [
+              {
+                "kind": "asset",
+                "id": "asset_document_42",
+                "version": 1
+              }
+            ],
+            "rule_refs": [
+              {
+                "kind": "security_rule",
+                "id": "rule_tenant_private",
+                "version": 1
+              }
+            ],
+            "supporting_refs": [
+              {
+                "local_ref": "observation_read"
+              },
+              {
+                "kind": "evidence",
+                "id": "evidence_read_001",
+                "version": 1
+              }
+            ],
+            "counterevidence_refs": [],
+            "required_conditions": [
+              {
+                "type": "session_authenticated",
+                "refs": [
+                  {
+                    "kind": "session",
+                    "id": "session_b",
+                    "version": 1
+                  }
+                ],
+                "expected": {
+                  "generation": 1,
+                  "identity_ref": {
+                    "kind": "identity",
+                    "id": "identity_b",
+                    "version": 1
+                  }
+                },
+                "rationale": "对象访问必须绑定实际测试身份和当前会话代次。"
+              },
+              {
+                "type": "rule_supported",
+                "refs": [
+                  {
+                    "kind": "security_rule",
+                    "id": "rule_tenant_private",
+                    "version": 1
+                  }
+                ],
+                "expected": {
+                  "status": "supported"
+                },
+                "rationale": "是否违反边界取决于适用业务规则。"
+              }
+            ],
+            "alternative_explanations": [
+              "存在合法共享授权",
+              "会话实际身份与预期不一致",
+              "材料来自缓存或旧环境"
+            ],
+            "missing_conditions": [
+              "对象归属与共享状态的当前对照",
+              "独立会话核对实际主体及内容"
+            ]
+          }
+        }
+      ],
+      "suggested_opportunities": [
+        {
+          "question": "核对合法共享、对象归属和当前实际身份能否解释本次读取。",
+          "lane": "correct",
+          "target_refs": [
+            {
+              "kind": "asset",
+              "id": "asset_document_42",
+              "version": 1
+            }
+          ],
+          "basis_refs": [
+            {
+              "local_ref": "candidate_access"
+            }
+          ],
+          "prerequisite_conditions": [
+            {
+              "type": "session_authenticated",
+              "refs": [
+                {
+                  "kind": "session",
+                  "id": "session_b",
+                  "version": 1
+                }
+              ],
+              "expected": {
+                "generation": 1,
+                "identity_ref": {
+                  "kind": "identity",
+                  "id": "identity_b",
+                  "version": 1
+                }
+              },
+              "rationale": "对象访问必须绑定实际测试身份和当前会话代次。"
+            }
+          ],
+          "expected_outcomes": [
+            "支持候选",
+            "排除候选",
+            "确认缺失条件"
+          ],
+          "method_family": "authorization-context-comparison",
+          "priority": "high",
+          "reason": "先排除正常解释，避免将一般访问能力直接发布为漏洞。",
+          "revisit_condition": null
+        }
+      ]
+    }
+  }
+}
