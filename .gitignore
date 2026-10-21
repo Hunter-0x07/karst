@@ -51,3 +51,6 @@ build/
 # --- Go ---
 /karst
 /karst-*
+
+# --- team social media workspace (private repo, never in the public tree) ---
+/social/
