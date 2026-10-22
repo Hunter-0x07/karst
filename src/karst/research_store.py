@@ -25,6 +25,19 @@ FIELDS = {
     "observation": "statement evidence_refs subject_refs conditions provenance contradicts_refs",
     "result": "submission_kind task_ref attempt_ref proposal_digest payload accepted_refs",
 }
+I0_KINDS = tuple(FIELDS)
+FIELDS.update({
+    "hypothesis": "question basis_refs alternative_explanations missing_conditions status",
+    "opportunity": "question lane target_refs basis_refs prerequisite_conditions expected_outcomes method_family priority reason dedup_key state wait_reason revisit_condition",
+})
+FIELDS.update({
+    "security_rule": "statement applies_to_refs source_refs source_type status",
+    "candidate": "claim_revision claim affected_refs rule_refs supporting_refs counterevidence_refs required_conditions alternative_explanations missing_conditions state",
+    "verification": "candidate_ref candidate_claim_revision task_ref role_session_id evidence_refs conditions_checked counterevidence_refs verdict reproduction_status impact_boundary remaining_questions independence",
+    "capability": "claim_revision subject_ref resource_ref actions session_ref vantage_ref conditions evidence_refs status origin validated_by_ref observed_at invalidated_reason",
+    "capability_check": "capability_ref capability_claim_revision operation_refs evidence_refs predicate_id predicate_version conditions_checked verdict limitations",
+    "path_edge": "input_capability_refs operation_refs output_capability_refs evidence_refs status",
+})
 
 
 def ref(record):
@@ -108,7 +121,7 @@ class ResearchStore:
         return r
 
     def get(self, record_id, *, version=None, run_id=None):
-        if not isinstance(record_id, str) or not re.fullmatch(r"[a-z]+_[0-9a-f]{32}", record_id):
+        if not isinstance(record_id, str) or not re.fullmatch(r"[a-z]+(?:_[a-z]+)*_[0-9a-f]{32}", record_id):
             raise KarstError("invalid formal identifier")
         if version is not None and (type(version) is not int or version < 1):
             raise KarstError("invalid reference version")
@@ -138,7 +151,15 @@ class ResearchStore:
                  "operation": ("execution_state", {"planned", "running", "succeeded", "failed", "unknown", "not_executed"}),
                  "session": ("auth_status", {"unverified", "authenticated", "expired", "revoked"}),
                  "identity": ("source", {"provided", "discovered"}),
-                 "result": ("submission_kind", {"publish", "final"})}
+                 "result": ("submission_kind", {"publish", "final"}),
+                 "security_rule": ("status", {"proposed", "supported", "disputed", "superseded"}),
+                 "candidate": ("state", {"open", "verifying", "supported", "ruled_out", "inconclusive", "needs_revalidation"}),
+                 "verification": ("verdict", {"supported", "ruled_out", "inconclusive"}),
+                 "capability": ("status", {"observed", "verified", "stale", "refuted"}),
+                 "capability_check": ("verdict", {"satisfied", "not_satisfied", "unknown"}),
+                 "path_edge": ("status", {"proposed", "proven", "stale", "refuted"})}
+        if kind in ("candidate", "capability") and (type(data["claim_revision"]) is not int or data["claim_revision"] < 1):
+            raise KarstError("invalid claim revision")
         if kind in enums:
             field, allowed = enums[kind]
             if not isinstance(data[field], str) or data[field] not in allowed:
@@ -149,7 +170,7 @@ class ResearchStore:
             raise KarstError("invalid evidence state")
         digest(data)
         record_id = record_id or new_id(kind)
-        if not record_id.startswith(kind+"_") or (kind == "run" and record_id != run_id):
+        if not isinstance(record_id, str) or not re.fullmatch(re.escape(kind)+r"_[0-9a-f]{32}", record_id) or (kind == "run" and record_id != run_id):
             raise KarstError("record ownership mismatch")
         with self.atomic():
             old = self.db.execute("SELECT MAX(version) FROM records WHERE id=?", (record_id,)).fetchone()[0] or 0
@@ -239,6 +260,15 @@ class ResearchStore:
                 raise KarstError("budget_exhausted")
             self.db.execute("INSERT INTO reservations VALUES(?,?,?,NULL,'reserved')", (run_id, key, encoded(amounts).decode()))
 
+    def attempt_usage(self, run_id, attempt_id):
+        current = self.usage(run_id)
+        start = next((a["usage_start"] for a in self.audits(run_id)
+                      if a["kind"] == "context" and a["context"]["attempt_ref"]["id"] == attempt_id
+                      and "usage_start" in a), {"charged_or_reserved": {}, "unsettled": []})
+        return {"charged_or_reserved": {k: v-start["charged_or_reserved"].get(k, 0)
+                                       for k, v in current["charged_or_reserved"].items()},
+                "unsettled": [k for k in current["unsettled"] if k not in start["unsettled"]], "cost": None}
+
     def settle(self, run_id, key, actual=None):
         with self.atomic():
             row = self.db.execute("SELECT amounts FROM reservations WHERE run_id=? AND key=?", (run_id, key)).fetchone()
@@ -277,13 +307,22 @@ class ResearchStore:
             payload = deepcopy(envelope["payload"])
             exact(payload, ["summary", "outcome", "proposed_records", "suggested_opportunities"])
             text(payload["summary"])
-            if payload["outcome"] not in ("progress", "no_progress", "partial", "inconclusive") or payload["suggested_opportunities"] != []:
+            product = run["data"]["spec"]["runtime_profile"]["support_matrix_ref"] == "support:product-v1"
+            research = product or run["data"]["spec"]["runtime_profile"]["support_matrix_ref"] == "support:research-v1"
+            if product:
+                for field in ("proposed_records", "suggested_opportunities"):
+                    if not isinstance(payload[field], list):
+                        raise KarstError(field+" must be a native JSON array, not a JSON-encoded string. "
+                                         "Use [] or [{...}] directly; each proposed_records item needs local_ref,kind,data. "
+                                         "Correct the arguments using a new tool call ID.")
+            if payload["outcome"] not in ("progress", "no_progress", "partial", "inconclusive") or (not research and payload["suggested_opportunities"] != []):
                 raise KarstError("unsupported outcome/opportunity proposal")
             proposals = payload["proposed_records"]
-            if not isinstance(proposals, list) or not 1 <= len(proposals) <= 16:
+            opportunity_only = product and task["data"]["role"] == "research" and endpoint == "publish" and bool(payload["suggested_opportunities"])
+            if not isinstance(proposals, list) or not (0 if opportunity_only else 1) <= len(proposals) <= 16:
                 raise KarstError("an evidence-backed observation is required")
             keys, prepared = set(), []
-            for p in proposals:
+            for p in ([] if research else proposals):
                 exact(p, ["local_ref", "kind", "data"])
                 text(p["local_ref"], 64)
                 if p["local_ref"] in keys or p["kind"] != "observation":
@@ -307,12 +346,18 @@ class ResearchStore:
             mapping = {}
             for p in prepared:
                 mapping[p["local_ref"]] = ref(self.put("observation", run_id, p["data"]))
+            if product and task["data"]["role"] == "verify":
+                from karst.product import accept_verification
+                mapping, payload = accept_verification(self, run, task, attempt, payload, endpoint)
+            elif research:
+                from karst.frontier import accept_research
+                mapping, payload = accept_research(self, run, task, payload)
             # I0 has no cross-proposal local links: each observation cites existing material.
             result = self.put("result", run_id, {"submission_kind": endpoint, "task_ref": ref(task), "attempt_ref": ref(attempt),
                 "proposal_digest": proposal_digest, "payload": payload, "accepted_refs": list(mapping.values())})
             if endpoint == "final":
                 self.update(task, state="delivered", result_ref=ref(result), outcome=payload["outcome"])
-                self.update(attempt, state="delivered", stop_reason="submitted", usage=self.usage(run_id))
+                self.update(attempt, state="delivered", stop_reason="submitted", usage=self.attempt_usage(run_id, attempt["id"]))
             seq = self.db.execute("SELECT MAX(sequence) FROM changes WHERE run_id=?", (run_id,)).fetchone()[0]
             receipt = {"request_id": envelope["request_id"], "proposal_digest": proposal_digest, "status": "accepted",
                        "result_ref": ref(result), "local_ref_map": mapping, "state_version": seq, "error": None}
@@ -328,7 +373,25 @@ class ResearchStore:
                     self.evidence_bytes(ref(record), run_id)
                 except KarstError:
                     record["data"]["availability"] = "unavailable"
+        product = run["data"]["spec"]["runtime_profile"]["support_matrix_ref"] == "support:product-v1"
+        findings = []
+        if product:
+            from karst.product import findings as project_findings, usable_capability
+            findings = project_findings(self, run_id)
+            stale = set()
+            for record in records:
+                if record["kind"] == "capability":
+                    try:
+                        usable_capability(self, run_id, ref(record))
+                    except KarstError as exc:
+                        record["data"].update(status="stale", invalidated_reason=str(exc))
+                        stale.add(record["id"])
+            for record in records:
+                if record["kind"] == "path_edge" and any(r["id"] in stale for r in record["data"]["input_capability_refs"]+record["data"]["output_capability_refs"]):
+                    record["data"]["status"] = "stale"
         return {"run_id": run_id, "record_schema": "karst-design/1", "run": run["data"], "records": records,
                 "receipts": [json.loads(r[0]) for r in self.db.execute("SELECT data FROM receipts WHERE run_id=? ORDER BY rowid", (run_id,))],
-                "usage": self.usage(run_id), "audit": self.audits(run_id), "findings": [],
-                "capability_status": "I0 normal-business model/HTTP integration; no vulnerability evaluation"}
+                "usage": self.usage(run_id), "audit": self.audits(run_id), "findings": findings,
+                "capability_status": ("Registered JSON object-read boundary verification; see coverage and limitations" if product else "Method-guided multi-task research; no capability or vulnerability verification"
+                                      if run["data"]["spec"]["runtime_profile"]["support_matrix_ref"] == "support:research-v1"
+                                      else "I0 normal-business model/HTTP integration; no vulnerability evaluation")}

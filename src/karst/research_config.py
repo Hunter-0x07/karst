@@ -15,6 +15,10 @@ BUDGET_KEYS = "model_requests input_tokens output_tokens http_requests network_c
 PROFILE = {"mode": "live", "model_config_ref": "config:i0-gateway-v1",
            "tool_profile_ref": "registry:i0-get-v1", "support_matrix_ref": "support:i0-v1",
            "dependency_lock_ref": "lock:stdlib-3.12-v1", "policy_version": "i0-v1"}
+RESEARCH_PROFILE = dict(PROFILE, tool_profile_ref="registry:research-get-v1",
+                        support_matrix_ref="support:research-v1", policy_version="research-v1")
+PRODUCT_PROFILE = dict(RESEARCH_PROFILE, tool_profile_ref="registry:product-get-v2",
+                       support_matrix_ref="support:product-v1", policy_version="product-v2", model_config_ref="config:product-gateway-v1")
 EXECUTION = {"allowed_cidrs": ["127.0.0.1/32"], "denied_cidrs": [], "http_timeout_seconds": 10,
              "max_response_bytes": 65536, "max_redirects": 2, "preview_bytes": 768,
              "max_read_bytes": 8192, "max_total_read_bytes": 131072}
@@ -59,6 +63,35 @@ class Launch:
     briefing: str
     transport: object
     execution: dict
+    research: bool = False
+    product: bool = False
+
+
+def research_template(origin, briefing, *, mode="live"):
+    """Method-guided research with a bounded, serial opportunity frontier."""
+    value = template(origin, briefing, mode=mode)
+    value["schema_version"] = "karst-research-launch/1"
+    spec = value["spec"]
+    spec["runtime_profile"] = dict(RESEARCH_PROFILE, mode=mode)
+    spec["policy"]["tool_profile_ref"] = RESEARCH_PROFILE["tool_profile_ref"]
+    spec["objectives"]["investigate_further"] = True
+    spec["scheduling"].update(max_ready=8, max_same_lane=3, aging_rounds=4)
+    for key in BUDGET_KEYS[:-1]:
+        spec["budget"][key] *= 3
+    return value
+
+
+def product_template(origin, briefing, *, mode="live"):
+    value = research_template(origin, briefing, mode=mode)
+    value["schema_version"] = "karst-product-launch/1"
+    spec = value["spec"]
+    spec["runtime_profile"] = dict(PRODUCT_PROFILE, mode=mode)
+    spec["policy"]["tool_profile_ref"] = PRODUCT_PROFILE["tool_profile_ref"]
+    spec["objectives"]["discover_security_issues"] = True
+    # A separate, explicit product budget includes independent verification.
+    for key in BUDGET_KEYS[:-1]:
+        spec["budget"][key] = min(spec["budget"][key]*2, 3600 if key == "wall_seconds" else 2**31-1)
+    return value
 
 
 class ScopedTransport:
@@ -97,26 +130,31 @@ def parse_launch(value):
 def _parse_launch(value):
     value = deepcopy(value)
     exact(value, ["schema_version", "briefing", "spec", "identities", "execution"])
-    if value["schema_version"] != "karst-i0-launch/1":
+    product = value["schema_version"] == "karst-product-launch/1"
+    research = product or value["schema_version"] == "karst-research-launch/1"
+    if value["schema_version"] not in ("karst-i0-launch/1", "karst-research-launch/1", "karst-product-launch/1"):
         raise KarstError("unsupported launch schema")
     briefing = text(value["briefing"])
     s, e = value["spec"], value["execution"]
     exact(s, ["entrypoints", "scope", "identity_refs", "objectives", "policy", "budget", "scheduling", "stop_policy", "initial_context_refs", "runtime_profile"])
     if s["identity_refs"] != [] or s["initial_context_refs"] != []:
         raise KarstError("I0 launch binds new identities internally; pre-existing references unsupported")
-    if s["objectives"] != {"discover_security_issues": False, "investigate_further": False, "depth_goals": []}:
+    if s["objectives"] != {"discover_security_issues": product, "investigate_further": research, "depth_goals": []}:
         raise KarstError("unsupported research/capability objectives in I0 normal-business slice")
     if s["stop_policy"] != {"stop_on_goal": False, "coverage_contract": None, "user_stop_conditions": []}:
         raise KarstError("unsupported goal/coverage stop contract")
     profile = s["runtime_profile"]
     exact(profile, PROFILE)
-    if profile["mode"] not in ("live", "mock") or any(profile[k] != v for k, v in PROFILE.items() if k != "mode"):
+    registered = PRODUCT_PROFILE if product else RESEARCH_PROFILE if research else PROFILE
+    if profile["mode"] not in ("live", "mock") or any(profile[k] != v for k, v in registered.items() if k != "mode"):
         raise KarstError("unregistered runtime profile")
     schedule = s["scheduling"]
     exact(schedule, ["max_workers", "max_ready", "max_same_lane", "aging_rounds", "max_attempts_per_fingerprint", "max_corrections", "per_task_budget"])
-    for key in ("max_workers", "max_ready", "max_same_lane", "aging_rounds", "max_attempts_per_fingerprint"):
+    for key in ("max_workers", "max_attempts_per_fingerprint") + (() if research else ("max_ready", "max_same_lane", "aging_rounds")):
         if type(schedule[key]) is not int or schedule[key] != 1:
             raise KarstError("I0 supports one task and one attempt; opportunity scheduling unsupported")
+    for key in ("max_ready", "max_same_lane", "aging_rounds"):
+        positive(schedule[key], 32)
     positive(schedule["max_corrections"], 5)
     for b in (s["budget"], schedule["per_task_budget"]):
         exact(b, BUDGET_KEYS)
@@ -133,7 +171,7 @@ def _parse_launch(value):
         raise KarstError("unsupported impact policy")
     if p["identity_policy"] != {"allowed_identity_refs": [], "auth_modes": ["managed", "anonymous"]}:
         raise KarstError("unsupported identity policy")
-    if p["tool_profile_ref"] != PROFILE["tool_profile_ref"] or p["mutation_policy"] != {"shared_writes": "exclusive", "test_resources_only": True}:
+    if p["tool_profile_ref"] != registered["tool_profile_ref"] or p["mutation_policy"] != {"shared_writes": "exclusive", "test_resources_only": True}:
         raise KarstError("unsupported tool/mutation policy")
     if p["cleanup"] != {"enabled": False, "allowed_impacts": [], "reserved_seconds": 0, "reserved_tool_starts": 0}:
         raise KarstError("cleanup actions unsupported")
@@ -186,4 +224,4 @@ def _parse_launch(value):
     transport = ScopedTransport(transport, scope)
     for url in s["entrypoints"]:
         transport.check_url(url)
-    return Launch(s, briefing, transport, e)
+    return Launch(s, briefing, transport, e, research, product)

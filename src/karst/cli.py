@@ -10,7 +10,7 @@ from karst.config import KarstError
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(prog="karst", description="Karst: first HTTP integration slice")
+    parser = argparse.ArgumentParser(prog="karst", description="Karst: evidence-based HTTP research and object-read verification")
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("list").add_argument("--data-dir", required=True)
     for name in ("doctor", "probe"):
@@ -27,9 +27,9 @@ def main(argv=None):
         if name == "evidence":
             command.add_argument("--evidence-id", required=True)
             command.add_argument("--raw", action="store_true", help="explicitly display restricted original evidence")
-    command = commands.add_parser("run", help="I0 model/HTTP investigation")
+    command = commands.add_parser("run", help="Model/HTTP investigation using the selected launch profile")
     command.add_argument("--config", required=True)
-    command.add_argument("--gateway", default="config/examples/gateway.json")
+    command.add_argument("--gateway", help="Gateway config; defaults to the launch profile's gateway")
     command.add_argument("--data-dir", required=True)
     commands.add_parser("resume", help="not yet available")
     args = parser.parse_args(argv)
@@ -42,7 +42,9 @@ def main(argv=None):
             from karst import research
             result = research.run(args.config, args.gateway, args.data_dir)
             print(json.dumps(result, ensure_ascii=True, indent=2))
-            return 0 if any(r["kind"] == "task" and r["data"]["state"] == "delivered" for r in result["records"]) else 1
+            return 0 if (result["run"]["state"] == "stopped"
+                         and result["run"]["stop_reason"]["code"] == "frontier_exhausted"
+                         and all(r["data"]["state"] == "delivered" for r in result["records"] if r["kind"] == "task")) else 1
         if formal:
             from karst import research
             from karst.research_store import ResearchStore, ref

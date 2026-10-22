@@ -1,0 +1,139 @@
+{
+  "schema_version": "karst-method-design/1",
+  "id": "object-access-boundary",
+  "version": 2,
+  "status": "integrated_as_guidance_only",
+  "question": "Does access to a business object violate an evidenced ownership or sharing rule, and what further investigation can actual results support?",
+  "applies_when": [
+    "A normally discoverable object or relevant function is known",
+    "Identity and object context can be investigated; framework fingerprint is optional"
+  ],
+  "initial_observations": [
+    "Normal navigation and object references",
+    "Actual subject or explicitly unknown status of each supplied session",
+    "Ownership, tenant and sharing rules with sources or explicit gaps"
+  ],
+  "alternative_explanations": [
+    "Explicit legitimate sharing",
+    "Public object",
+    "Expired or incorrectly bound identity",
+    "Cached or unrelated response",
+    "Different object than the one under investigation"
+  ],
+  "experiments": [
+    {
+      "purpose": "Probe an open question and collect missing context before choosing a deeper experiment",
+      "requires": [
+        "An allowed target and supported operation",
+        "Permitted impact and identity usage",
+        "Real required inputs and available budget; the hypothesis itself need not be supported"
+      ],
+      "records": [
+        "Question and source or explicitly labelled heuristic",
+        "Actual operation and response evidence",
+        "Changed understanding, alternatives and next useful action"
+      ]
+    },
+    {
+      "purpose": "Check whether a permitted identity, session or resource capability is actually usable",
+      "requires": [
+        "Permitted check with real input and current execution context",
+        "The capability being checked need not already be verified"
+      ],
+      "records": [
+        "Actual subject and session generation",
+        "Source evidence",
+        "Check verdict and limitations; reuse adequate existing evidence without mandatory replay"
+      ]
+    },
+    {
+      "purpose": "Establish legitimate behavior",
+      "requires": [
+        "Usable identity",
+        "Normally visible object"
+      ],
+      "records": [
+        "Identity evidence",
+        "Object context",
+        "Response evidence"
+      ]
+    },
+    {
+      "purpose": "Distinguish a suspected access-boundary violation from sharing or identity confusion",
+      "requires": [
+        "Supported applicable rule for interpreting a violation",
+        "Comparable object and operation",
+        "Separate identity contexts"
+      ],
+      "records": [
+        "Control evidence",
+        "Comparison evidence",
+        "Actual accessed content or action",
+        "Remaining alternatives"
+      ]
+    },
+    {
+      "purpose": "Follow up actual new resources within the current question or propose a new task",
+      "requires": [
+        "Actual source evidence",
+        "Scope and identity checks",
+        "Current verified conditions for capabilities used as established prerequisites"
+      ],
+      "records": [
+        "Input-to-output dependency",
+        "Executed follow-up",
+        "Verified resulting access or resource; final vulnerability review may be pending"
+      ]
+    },
+    {
+      "purpose": "Combine related results into a testable follow-up hypothesis",
+      "requires": [
+        "At least two relevant source records",
+        "Explicit role of each source, compatibility checks and missing conditions",
+        "Current actual prerequisites before dependent execution"
+      ],
+      "records": [
+        "Hypothesis basis references",
+        "Predicted result and discriminating observation",
+        "Actual dependent operations and checked output, or why the combination is deferred or ruled out"
+      ]
+    }
+  ],
+  "candidate_requires": [
+    "Specific affected object and action",
+    "Supported applicable rule",
+    "Actual contrary behavior",
+    "Evidence references",
+    "Explicit missing conditions and alternatives"
+  ],
+  "review_requires": [
+    "Recheck identity, ownership and sharing conditions",
+    "Read original material",
+    "Perform meaningful independent control when feasible",
+    "Bind candidate claim revision",
+    "Explain impact and remaining uncertainty"
+  ],
+  "inconclusive_when": [
+    "Unknown sharing rules",
+    "Unverified identity needed for the claim",
+    "Partial material cannot prove actual content",
+    "Changed target state prevents interpretation",
+    "Combination depends on incompatible or unverified conditions"
+  ],
+  "stop_or_redirect_when": [
+    "Decisive legitimate explanation",
+    "Missing external prerequisite",
+    "Budget exhausted or review/cleanup reservation needed",
+    "No new distinguishing experiment within remaining budget",
+    "Unknown side effect requires reconciliation before replay"
+  ],
+  "prohibitions": [
+    "Do not infer a vulnerability from status code or response length alone",
+    "Do not present guessed routes as observed or use evaluation-only answers",
+    "Do not treat supplied privileges as acquired capability",
+    "Do not use this method to change scope or formal result state",
+    "Do not require a tested hypothesis to be true before probing it",
+    "Do not turn a combination proposal or adjacent operations into a proven path",
+    "Do not force three branches, a fixed probe share or unsupported mechanical repetition"
+  ]
+}

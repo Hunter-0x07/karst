@@ -1,0 +1,14 @@
+{
+  "api_base": "http://127.0.0.1:11435/v1",
+  "model": "qwen3.8-27b",
+  "max_tokens": 16384,
+  "max_tokens_field": "max_tokens",
+  "timeout_seconds": 300,
+  "connect_timeout_seconds": 10,
+  "max_retries": 1,
+  "retry_backoff_seconds": 10,
+  "min_request_interval_seconds": 15,
+  "max_response_bytes": 2000000,
+  "temperature": null,
+  "trust_env": false
+}

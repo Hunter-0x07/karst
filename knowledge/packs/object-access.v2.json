@@ -1,5 +1,5 @@
 {
-  "schema_version": "answer-method-design/1",
+  "schema_version": "karst-method-design/1",
   "id": "object-access-boundary",
   "version": 2,
   "status": "specified_not_integrated",

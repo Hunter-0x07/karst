@@ -1,3 +1,3 @@
-"""Karst core: bounded I0 model/HTTP investigation; vulnerability research pending."""
+"""Karst: bounded research, object-read verification and evidence-backed reports."""
 
-__version__ = "0.0.2"
+__version__ = "0.0.4"

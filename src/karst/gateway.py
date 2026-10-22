@@ -16,14 +16,21 @@ from urllib.parse import urlsplit
 from karst.config import KarstError, exact, parse_url, positive, strict_json
 from karst.errors import GatewayError, ProtocolError
 from karst.execution import PinnedConnection, abort, resolve
-from karst.protocol import ModelRequest, parse_reply, validate_request
+from karst.protocol import ModelRequest, parse_reply, response_usage, validate_request
 from karst.store import encoded, new_id
+
+
+def default_gateway_path(*, research=False):
+    return "config/examples/research-gateway.json" if research else "config/examples/gateway.json"
 
 
 def load_gateway(path):
     c = strict_json(Path(path).read_text(encoding="utf-8"))
+    c = {"min_request_interval_seconds": 0, **c} if isinstance(c, dict) else c
     exact(c, ["api_base", "model", "max_tokens", "max_tokens_field", "timeout_seconds", "connect_timeout_seconds",
-              "max_retries", "retry_backoff_seconds", "max_response_bytes", "temperature", "trust_env"])
+              "max_retries", "retry_backoff_seconds", "max_response_bytes", "temperature", "trust_env", "min_request_interval_seconds"])
+    if type(c["min_request_interval_seconds"]) is not int or not 0 <= c["min_request_interval_seconds"] <= 60:
+        raise KarstError("invalid gateway request interval")
     parsed = parse_url(c["api_base"].rstrip("/")+"/chat/completions")
     if urlsplit(parsed[0]).query or c["trust_env"] is not False or not isinstance(c["model"], str) or not c["model"].strip():
         raise KarstError("invalid explicit gateway endpoint/model")
@@ -42,6 +49,10 @@ def safe_messages(messages):
 
 
 class Gateway:
+    # One serial Runtime, including its subsequent Tasks/Runs, shares a quiet
+    # interval for the same endpoint/model. No extra provider calls are made.
+    _last_response_at = {}
+
     def __init__(self, config, store, run_id, budget, deadline, *, check=lambda: None):
         self.config, self.store, self.run_id = config, store, run_id
         self.budget, self.deadline, self.check = budget, deadline, check
@@ -49,6 +60,22 @@ class Gateway:
         if self.key and not re.fullmatch(r"[A-Za-z0-9._~+/=-]{1,8192}", self.key):
             raise KarstError("invalid TESTER_API_KEY")
         self.last_request_id = None
+
+    def _pace(self):
+        interval = self.config.get("min_request_interval_seconds", 0)
+        key = (self.config["api_base"], self.config["model"])
+        while interval:
+            self.check()
+            now = time.monotonic()
+            if now >= self.deadline:
+                raise KarstError("budget_exhausted")
+            last = self._last_response_at.get(key)
+            if last is None:
+                break
+            delay = last+interval-now
+            if delay <= 0:
+                break
+            time.sleep(min(delay, self.deadline-now, 0.1))
 
     def generate(self, messages, tools=None, *, tool_choice=None):
         request = ModelRequest(messages, tools, tool_choice)
@@ -61,17 +88,24 @@ class Gateway:
             payload["tool_choice"] = tool_choice
         if c["temperature"] is not None:
             payload["temperature"] = c["temperature"]
-        raw = encoded(payload)
-        if len(raw) > 524288:
-            raise KarstError("model_context_limit")
-        # A conservative accounting reservation, not claimed provider usage. Unknown
-        # usage retains the entire reservation. Provider overage stops the run.
-        allowance = {"model_requests": 1, "input_tokens": len(raw)*2+4096, "output_tokens": c["max_tokens"]}
         for attempt in range(c["max_retries"]+1):
+            self.check()
+            self._pace()
             self.check()
             remaining = self.deadline-time.monotonic()
             if remaining <= 0:
                 raise KarstError("budget_exhausted")
+            # The configured ceiling is not a minimum allocation. Use the
+            # remaining task/Run allowance, also after a charged retry.
+            output_left = self.budget["output_tokens"]-self.store.usage(self.run_id)["charged_or_reserved"].get("output_tokens", 0)
+            if output_left <= 0:
+                raise KarstError("budget_exhausted")
+            output_limit = min(c["max_tokens"], output_left)
+            payload[c["max_tokens_field"]] = output_limit
+            raw = encoded(payload)
+            if len(raw) > 524288:
+                raise KarstError("model_context_limit")
+            allowance = {"model_requests": 1, "input_tokens": len(raw)*2+4096, "output_tokens": output_limit}
             key = new_id("model")
             self.last_request_id = key
             self.store.reserve(self.run_id, key, allowance, self.budget)
@@ -81,30 +115,41 @@ class Gateway:
             self.store.audit(self.run_id, "model_start", {"request_id": key, "logical_request_id": request.request_id,
                 "attempt": attempt+1, "model": c["model"], "config_digest": hashlib.sha256(encoded(c)).hexdigest(),
                 "payload_sha256": hashlib.sha256(raw).hexdigest(),
-                "messages": safe_messages(messages), "tools": tools, "tool_choice": tool_choice})
+                "messages": safe_messages(messages), "tools": tools, "tool_choice": tool_choice,
+                "output_token_limit": output_limit})
             status = None
             usage = None
+            settled = False
             try:
-                response, status = self._send(raw, min(remaining, c["timeout_seconds"]))
-                reply = parse_reply(response, request_id=key, model=c["model"], attempts=attempt+1,
-                                    elapsed_seconds=round(time.monotonic()-begin, 6))
-                if reply.is_truncated:
-                    raise ProtocolError("TOKEN_LIMIT", "truncated model response is not executable")
-                usage = reply.usage
+                try:
+                    response, status = self._send(raw, min(remaining, c["timeout_seconds"]))
+                finally:
+                    if c.get("min_request_interval_seconds", 0):
+                        self._last_response_at[(c["api_base"], c["model"])] = time.monotonic()
+                # Account for valid provider usage before parsing tool arguments.
+                # A truncated/invalid response still consumed a paid request.
+                usage = response_usage(response)
                 actual = None
                 if usage and all(type(usage.get(k)) is int for k in ("prompt_tokens", "completion_tokens")):
                     actual = {"model_requests": 1, "input_tokens": usage["prompt_tokens"], "output_tokens": usage["completion_tokens"]}
                 self.store.settle(self.run_id, key, actual)
+                settled = True
+                reply = parse_reply(response, request_id=key, model=c["model"], attempts=attempt+1,
+                                    elapsed_seconds=round(time.monotonic()-begin, 6))
+                if reply.is_truncated:
+                    raise ProtocolError("TOKEN_LIMIT", "truncated model response is not executable")
                 self.store.audit(self.run_id, "model_end", {"request_id": key, "status": "succeeded", "http_status": status,
                     "elapsed_seconds": reply.elapsed_seconds, "usage": usage, "provider_response_id": reply.provider_response_id,
                     "message": safe_messages([reply.to_assistant_message()])[0]})
                 return reply
             except KeyboardInterrupt:
-                self.store.settle(self.run_id, key)
+                if not settled:
+                    self.store.settle(self.run_id, key)
                 self.store.audit(self.run_id, "model_end", {"request_id": key, "status": "cancelled", "usage": None})
                 raise
             except (GatewayError, OSError, http.client.HTTPException, KarstError) as exc:
-                self.store.settle(self.run_id, key)
+                if not settled:
+                    self.store.settle(self.run_id, key)
                 error = exc if isinstance(exc, GatewayError) else GatewayError("provider", type(exc).__name__, "bounded gateway request failed")
                 self.store.audit(self.run_id, "model_end", {"request_id": key, "status": "failed", "code": error.code,
                     "http_status": error.http_status, "elapsed_seconds": round(time.monotonic()-begin, 6), "usage": usage})

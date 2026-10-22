@@ -90,7 +90,10 @@ def score(store, run_id, fixture, *, offline_read_passed):
     reads = [a for a in ends if a["name"] == "evidence_read" and not a["reply"].get("error")]
     publish = [a for a in ends if a["name"] == "publish_research" and a["reply"].get("status") == "accepted"]
     finals = [r for r in records.values() if r["kind"] == "result" and r["data"]["submission_kind"] == "final"]
-    final_observations = [records[r["id"]] for f in finals for r in f["data"]["accepted_refs"]]
+    # Research finals also accept resources and open hypotheses. Only actual
+    # observations can satisfy the fact/evidence check; a hypothesis is not proof.
+    final_records = [records[r["id"]] for f in finals for r in f["data"]["accepted_refs"]]
+    final_observations = [r for r in final_records if r["kind"] == "observation"]
     material = {}
     for a in http:
         for er in a["reply"]["evidence_refs"]:
@@ -113,8 +116,8 @@ def score(store, run_id, fixture, *, offline_read_passed):
                         valid_dependency = True
         dynamic.append(valid_dependency)
         identities.append(bool(details) and all(m["exchange"]["request"]["identity"] == name and json.loads(m["body"])["subject"] == name for _, m in details))
-        facts.append(any(user["code"] in o["data"]["statement"] and user["order"] in o["data"]["statement"] and name in o["data"]["statement"].lower()
-                         and any(er["id"] in {eid for eid, _ in details} for er in o["data"]["evidence_refs"]) for o in final_observations))
+        facts.append(any(user["code"] in o["data"].get("statement", "") and user["order"] in o["data"].get("statement", "") and name in o["data"].get("statement", "").lower()
+                         and any(er["id"] in {eid for eid, _ in details} for er in o["data"].get("evidence_refs", [])) for o in final_observations))
         read_hidden.append(any(r["reply"]["evidence_ref"]["id"] in {eid for eid, _ in details} and user["code"] in r["reply"]["body_text"]
                                and user["code"] not in material[r["reply"]["evidence_ref"]["id"]]["event"]["reply"]["preview"]["body_text"]
                                and r["reply"]["target_requests"] == 0 for r in reads))

@@ -1,0 +1,139 @@
+{
+  "schema_version": "karst-research-launch/1",
+  "briefing": "调查采购演示站。入口任务只读取入口并建立对象认识，分批发布有来源的资源、待验证假设和研究机会，再交付入口调查任务。将 Alice 和 Bob 各自订单的核对分别交给后续任务，问题与资源必须来自实际材料。两个后续任务的问题与预期产出中都明确要求实际用户名、订单编号、完整 reconciliation_code 和详情证据。入口任务交付后才由 Host 派发后续任务，不在入口任务中完成两人的调查。后续任务各自依据目录和详情整理实际用户名、订单编号、完整 reconciliation_code 及各自详情证据，同时如实记录归属或共享规则中仍不清楚的地方。不要重复访问已经保存的入口；每个身份的完整事实至少写入一条 observation 的 statement，并引用该身份详情证据；按需读取预览外的正文。授权范围内的身份对照可以执行，403 如实记为拒绝访问，不替代正常身份取证。已有证据可直接复用，不对同一 URL 和身份重复请求；共享规则仍不清楚时保留开放假设，不为相同未知点重复派发任务。只有实际新问题且存在新的可执行取证动作时才提出后续机会。此场景只检查多任务研究，不要求提出漏洞或权限结论。",
+  "spec": {
+    "entrypoints": [
+      "http://127.0.0.1:8765/"
+    ],
+    "scope": {
+      "web_origins": [
+        {
+          "origin": "http://127.0.0.1:8765",
+          "path_prefixes": [
+            "/"
+          ]
+        }
+      ],
+      "network_targets": [
+        {
+          "host": "127.0.0.1",
+          "ports": [
+            8765
+          ],
+          "protocols": [
+            "http"
+          ],
+          "vantage_keys": [
+            "workstation"
+          ]
+        }
+      ],
+      "denied_targets": [],
+      "default_action": "deny"
+    },
+    "identity_refs": [],
+    "objectives": {
+      "discover_security_issues": false,
+      "investigate_further": true,
+      "depth_goals": []
+    },
+    "policy": {
+      "allowed_impacts": [
+        "observe",
+        "read_authorized_data"
+      ],
+      "unknown_impact": "classify_or_deny",
+      "identity_policy": {
+        "allowed_identity_refs": [],
+        "auth_modes": [
+          "managed",
+          "anonymous"
+        ]
+      },
+      "tool_profile_ref": "registry:research-get-v1",
+      "network": {
+        "egress_profile_ref": "egress:i0-launch-v1",
+        "requests_per_second": 2,
+        "max_connections": 1
+      },
+      "mutation_policy": {
+        "shared_writes": "exclusive",
+        "test_resources_only": true
+      },
+      "cleanup": {
+        "enabled": false,
+        "allowed_impacts": [],
+        "reserved_seconds": 0,
+        "reserved_tool_starts": 0
+      }
+    },
+    "budget": {
+      "model_requests": 36,
+      "input_tokens": 3000000,
+      "output_tokens": 147456,
+      "http_requests": 90,
+      "network_connections": 90,
+      "network_bytes": 805306368,
+      "tool_starts": 180,
+      "wall_seconds": 2700,
+      "cost_limit": null
+    },
+    "scheduling": {
+      "max_workers": 1,
+      "max_ready": 8,
+      "max_same_lane": 3,
+      "aging_rounds": 4,
+      "max_attempts_per_fingerprint": 1,
+      "max_corrections": 2,
+      "per_task_budget": {
+        "model_requests": 12,
+        "input_tokens": 1000000,
+        "output_tokens": 49152,
+        "http_requests": 30,
+        "network_connections": 30,
+        "network_bytes": 268435456,
+        "tool_starts": 60,
+        "wall_seconds": 900,
+        "cost_limit": null
+      }
+    },
+    "stop_policy": {
+      "stop_on_goal": false,
+      "coverage_contract": null,
+      "user_stop_conditions": []
+    },
+    "initial_context_refs": [],
+    "runtime_profile": {
+      "mode": "live",
+      "model_config_ref": "config:i0-gateway-v1",
+      "tool_profile_ref": "registry:research-get-v1",
+      "support_matrix_ref": "support:research-v1",
+      "dependency_lock_ref": "lock:stdlib-3.12-v1",
+      "policy_version": "research-v1"
+    }
+  },
+  "identities": [
+    {
+      "name": "alice",
+      "origin": "http://127.0.0.1:8765",
+      "bearer_env": "KARST_I0_ALICE"
+    },
+    {
+      "name": "bob",
+      "origin": "http://127.0.0.1:8765",
+      "bearer_env": "KARST_I0_BOB"
+    }
+  ],
+  "execution": {
+    "allowed_cidrs": [
+      "127.0.0.1/32"
+    ],
+    "denied_cidrs": [],
+    "http_timeout_seconds": 10,
+    "max_response_bytes": 65536,
+    "max_redirects": 2,
+    "preview_bytes": 768,
+    "max_read_bytes": 8192,
+    "max_total_read_bytes": 131072
+  }
+}

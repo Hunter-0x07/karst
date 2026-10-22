@@ -149,7 +149,7 @@ class HttpExecutor:
         partial = False
         expected_length = None
         location = None
-        request_headers = {"User-Agent": "Karst-Core/0.0.1", "Accept-Encoding": "identity", "Connection": "close"}
+        request_headers = {"User-Agent": "Karst-Core/0.0.3", "Accept-Encoding": "identity", "Connection": "close"}
         if identity:
             request_headers["Authorization"] = "Bearer " + self.secrets[identity.name]
         try:

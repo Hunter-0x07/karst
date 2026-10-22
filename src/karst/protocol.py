@@ -145,6 +145,15 @@ def validate_request(request: ModelRequest) -> None:
     _serializable(request.tool_choice)
 
 
+def response_usage(payload: Any) -> dict[str, int | None] | None:
+    """Usage belongs to an actual request even when its content cannot execute."""
+    usage = payload.get("usage") if isinstance(payload, dict) else None
+    if not isinstance(usage, dict):
+        return None
+    return {name: value if type(value := usage.get(name)) is int and value >= 0 else None
+            for name in ("prompt_tokens", "completion_tokens", "total_tokens")}
+
+
 def parse_reply(payload: Any, *, request_id: str, model: str, attempts: int, elapsed_seconds: float) -> ModelReply:
     if not isinstance(payload, dict) or not isinstance(payload.get("choices"), list) or len(payload["choices"]) != 1:
         raise ProtocolError("INVALID_CHOICES", "网关响应需要恰好一个 choices 项。")
@@ -216,15 +225,7 @@ def parse_reply(payload: Any, *, request_id: str, model: str, attempts: int, ela
         ]
     if isinstance(message.get("reasoning_content"), str):
         assistant["reasoning_content"] = message["reasoning_content"]
-    usage = payload.get("usage")
-    if isinstance(usage, dict):
-        normalized_usage: dict[str, int | None] = {}
-        for name in ("prompt_tokens", "completion_tokens", "total_tokens"):
-            value = usage.get(name)
-            normalized_usage[name] = value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
-        usage = normalized_usage
-    else:
-        usage = None
+    usage = response_usage(payload)
     response_id = payload.get("id")
     return ModelReply(request_id, response_id if isinstance(response_id, str) else None,
                       payload.get("model") if isinstance(payload.get("model"), str) else model,

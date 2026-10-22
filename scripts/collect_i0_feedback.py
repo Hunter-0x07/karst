@@ -16,7 +16,7 @@ import time
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT/"src"))
 from karst.config import KarstError
-from karst.gateway import load_gateway
+from karst.gateway import default_gateway_path, load_gateway
 from karst.research import PROMPT_VERSION, SYSTEM, TOOL_DEFINITIONS
 from karst.gateway_checks import PROTOCOL_VERSION, TOOL_CHOICE_POLICY
 from karst.i0_fixture import BRIEFING, BRIEFING_VERSION
@@ -28,11 +28,32 @@ def now():
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
+def main(*, stage="i0"):
+    prompt_version, system, tools = PROMPT_VERSION, SYSTEM, TOOL_DEFINITIONS
+    briefing_version, briefing, build_launch = BRIEFING_VERSION, BRIEFING, template
+    method = None
+    scorer_version = "i0-original"
+    batch_script, batch_timeout = "scripts/run_i0_batch.py", 2850
+    if stage in ("research", "product"):
+        from karst import frontier, research
+        from karst.research_fixture import BRIEFING_VERSION as briefing_version, BRIEFING as briefing
+        from karst.research_config import research_template as build_launch
+        from karst.research_scoring import SCORER_VERSION as scorer_version
+        prompt_version, system = frontier.PROMPT_VERSION, frontier.SYSTEM
+        tools = research.tool_definitions(True)
+        method = frontier.method_pack()
+        batch_script, batch_timeout = "scripts/run_research_batch.py", 8250
+        if stage == "product":
+            from karst import product
+            from karst.product_fixture import BRIEFING_VERSION as briefing_version, BRIEFING as briefing, SCORER_VERSION as scorer_version
+            from karst.research_config import product_template as build_launch
+            prompt_version, system = product.PROMPT_VERSION, product.SYSTEM
+            tools = research.tool_definitions(True, product=True)
+            batch_script, batch_timeout = "scripts/run_product_batch.py", 44100
+    parser = argparse.ArgumentParser(description="Freeze a clean SHA and collect "+stage+" engineering, live gateway and three-reset acceptance.")
     parser.add_argument("--expected-commit", required=True)
     parser.add_argument("--output", required=True)
-    parser.add_argument("--gateway", default="config/examples/gateway.json")
+    parser.add_argument("--gateway", default=default_gateway_path(research=stage in ("research", "product")))
     parser.add_argument("--role", choices=("runtime", "development"), default="runtime")
     parser.add_argument("--git", default="git")
     args = parser.parse_args()
@@ -99,10 +120,10 @@ def main():
         commands.append(info)
         return info, log
 
-    result = {"technical_pass": False, "human_acceptance": "pending", "inference_tested": False,
+    result = {"stage": stage, "technical_pass": False, "human_acceptance": "pending", "inference_tested": False,
               "capability_tests_executed": False, "gateway": None, "batch": None, "error": None}
     try:
-        unit, unitlog = execute("unittest", ["-m", "unittest", "discover", "-s", "tests", "-t", ".", "-v"], 240)
+        unit, unitlog = execute("unittest", ["-m", "unittest", "discover", "-s", "tests", "-t", ".", "-v"], 600 if stage == "product" else 240)
         count = re.search(r"Ran (\d+) tests?", unitlog)
         unit.update(tests=int(count[1]) if count else None, passed=unit["exit_code"] == 0 and bool(count) and int(count[1]) > 0 and unitlog.rstrip().endswith("OK"))
         result["unit"] = unit
@@ -116,13 +137,14 @@ def main():
                     result["error"] = "gateway diagnostic did not produce valid summary"
                 result["inference_tested"] = bool((result["gateway"] or {}).get("inference_tested"))
                 if protocol["exit_code"] == 0 and result["gateway"] and result["gateway"].get("passed"):
-                    batch_cmd, _ = execute("batch", ["scripts/run_i0_batch.py", "--gateway", str(gateway), "--output", str(private/"batch")], 2850)
+                    batch_cmd, _ = execute("batch", [batch_script, "--gateway", str(gateway), "--output", str(private/"batch")], batch_timeout)
                     summary_path = private/"batch/batch-summary.json"
                     if summary_path.is_file():
                         result["batch"] = json.loads(summary_path.read_text(encoding="utf-8"))
                         result["inference_tested"] |= result["batch"]["inference_tested"]
+                        result["capability_tests_executed"] = result["batch"].get("capability_tests_executed", False)
                     result["technical_pass"] = bool(batch_cmd["exit_code"] == 0 and result["batch"] and result["batch"]["mode"] == "live"
-                                                    and result["batch"]["technical_pass"] and len(result["batch"]["runs"]) == 3)
+                                                    and result["batch"]["technical_pass"] and len(result["batch"]["runs"]) == (12 if stage == "product" else 3))
             else:
                 result["error"] = "model listing unavailable; live protocol and batch not executed"
         else:
@@ -144,12 +166,13 @@ def main():
             "working_tree_dirty_before": False, "working_tree_dirty_after": dirty, "started_at": started, "finished_at": now(),
             "runtime_dependencies": [], "gateway_config_sha256": hashlib.sha256(gateway.read_bytes()).hexdigest(),
             "model": cfg["model"], "gateway_settings": {k: v for k, v in cfg.items() if k != "api_base"},
-            "prompt_version": PROMPT_VERSION, "tools_sha256": hashlib.sha256(encoded(TOOL_DEFINITIONS)).hexdigest(),
-            "system_prompt_sha256": hashlib.sha256(SYSTEM.encode("utf-8")).hexdigest(),
-            "briefing_version": BRIEFING_VERSION, "briefing_sha256": hashlib.sha256(BRIEFING.encode("utf-8")).hexdigest(),
+            "stage": stage, "method": method, "scorer_version": scorer_version,
+            "prompt_version": prompt_version, "tools_sha256": hashlib.sha256(encoded(tools)).hexdigest(),
+            "system_prompt_sha256": hashlib.sha256(system.encode("utf-8")).hexdigest(),
+            "briefing_version": briefing_version, "briefing_sha256": hashlib.sha256(briefing.encode("utf-8")).hexdigest(),
             "gateway_check_version": PROTOCOL_VERSION, "gateway_tool_choice_policy": TOOL_CHOICE_POLICY,
-            "per_run_budget": template("http://127.0.0.1:1", "budget snapshot")["spec"]["budget"],
-            "batch_runs": 3, "gateway_check_budget_is_separate": True, "human_acceptance": "pending"})
+            "per_run_budget": build_launch("http://127.0.0.1:1", "budget snapshot")["spec"]["budget"],
+            "batch_runs": 12 if stage == "product" else 3, "gateway_check_budget_is_separate": True, "human_acceptance": "pending"})
         save("commands.json", commands)
         source = {}
         for name in git("ls-files").splitlines():

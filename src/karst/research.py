@@ -14,10 +14,10 @@ from karst.application import credential_values
 from karst.config import KarstError, exact, positive
 from karst.errors import GatewayError, ProtocolError
 from karst.execution import HttpExecutor
-from karst.gateway import Gateway, load_gateway
+from karst.gateway import Gateway, default_gateway_path, load_gateway
 from karst.protocol import append_tool_results
 from karst.research_config import TOOLS, load_launch, text
-from karst.research_store import FIELDS, ResearchStore, digest, ref
+from karst.research_store import FIELDS, I0_KINDS, ResearchStore, digest, ref
 from karst.store import encoded, host_lock, new_id, utcnow
 
 PROMPT_VERSION = "i0-research-v3"
@@ -41,7 +41,7 @@ SCHEMAS = {
                          "query": {"type": "array", "items": {"type": "array", "items": {"type": "string"}, "minItems": 2, "maxItems": 2}}}),
     "evidence_read": obj({"evidence_ref": REF_SCHEMA, "offset": {"type": "integer", "minimum": 0}, "length": {"type": "integer", "minimum": 1, "maximum": 16384}}),
     "session_inspect": obj({}),
-    "state_query": obj({"kind": {"type": "string", "enum": list(FIELDS)}, "cursor": {"type": "integer", "minimum": 0}, "limit": {"type": "integer", "minimum": 1, "maximum": 20}}),
+    "state_query": obj({"kind": {"type": "string", "enum": list(I0_KINDS)}, "cursor": {"type": "integer", "minimum": 0}, "limit": {"type": "integer", "minimum": 1, "maximum": 20}}),
     "publish_research": PAYLOAD, "submit_result": PAYLOAD,
 }
 DESCRIPTIONS = {
@@ -76,6 +76,26 @@ provenance='agent_interpreted', contradicts_refs=[]. Do not submit until request
 submit_result must be alone in its response. Plain text does not finish a task. Use brief factual content;
 do not include internal reasoning. Budgets are hard limits; report partial evidence when unable to finish.
 """
+
+def tool_definitions(research=False, *, product=False, role="research"):
+    if not research:
+        return deepcopy(TOOL_DEFINITIONS)
+    from karst import frontier
+    if product:
+        from karst import product as product_module
+        definitions = product_module.schemas(SCHEMAS, obj, REF_SCHEMA)
+        if role == "verify":
+            definitions.pop("publish_research")
+            definitions["submit_result"] = product_module.verification_schema(obj, REF_SCHEMA)
+        descriptions = dict(DESCRIPTIONS, publish_research="Publish product research observations, explicit rules, candidates and opportunities. Host manages states; continue after acceptance.",
+                            submit_result="Submit this task's final records alone. Research submits observations; an assigned verifier submits one verification. Host validates and may dispatch another task.")
+        return [{"type": "function", "function": {"name": k, "description": descriptions[k], "parameters": v}}
+                for k, v in definitions.items()]
+    definitions = [{"type": "function", "function": {"name": k, "description": DESCRIPTIONS[k], "parameters": v}}
+                   for k, v in frontier.schemas(SCHEMAS, obj, REF_SCHEMA).items()]
+    definitions[-2]["function"]["description"] = "Publish research records and suggested opportunities; continue this task after acceptance."
+    definitions[-1]["function"]["description"] = "Submit self-contained conclusions for this task. Must be the only call. The Host may dispatch another task."
+    return definitions
 
 
 class TransportBridge:
@@ -130,7 +150,7 @@ class TransportBridge:
             error = dict(error, category=category)
         return {"task_ref": h.context["task_ref"], "attempt_ref": h.context["attempt_ref"],
                 "model_request_ref": {"kind": "model_request", "id": h.model_request_id, "version": 1} if h.model_request_id else None,
-                "parent_operation_ref": None, "tool_name": "http.request", "tool_version": "i0-v1",
+                "parent_operation_ref": getattr(h, "parent_operation_ref", None), "tool_name": "http.request", "tool_version": "i0-v1",
                 "arguments_digest": data["arguments_digest"], "config_version": 1,
                 "identity_ref": ref(identity) if identity else None, "session_generation": 1 if identity else None,
                 "vantage_ref": None, "execution_state": data["execution_state"], "started_at": data["started_at"],
@@ -148,11 +168,21 @@ class TransportBridge:
 class Host:
     def __init__(self, launch, store, secrets):
         self.launch, self.store, self.secrets = launch, store, secrets
+        from karst import frontier
+        self.schemas = frontier.schemas(SCHEMAS, obj, REF_SCHEMA) if launch.research else SCHEMAS
+        if launch.product:
+            from karst import product
+            self.schemas = product.schemas(SCHEMAS, obj, REF_SCHEMA)
+        self.tools = tool_definitions(launch.research, product=launch.product)
+        self.method = frontier.method_pack() if launch.research else None
         self.budget = launch.spec["scheduling"]["per_task_budget"]
-        self.deadline = time.monotonic()+self.budget["wall_seconds"]
+        self.usage_start = {}
+        self.run_deadline = time.monotonic()+launch.spec["budget"]["wall_seconds"]
+        self.deadline = min(self.run_deadline, time.monotonic()+self.budget["wall_seconds"])
         self.cancelled = False
         self.read_bytes = 0
         self.model_request_id = None
+        self.active_capability_refs, self.parent_operation_ref = [], None
         self.fatal = None
         self.identity_by_label, self.session_by_identity = {}, {}
         self.run_id = new_id("run")
@@ -173,9 +203,17 @@ class Host:
                 self.session_by_identity[item["id"]] = store.put("session", self.run_id, {"identity_ref": ref(item),
                     "resource_ref": ref(assets[identity.origin]), "generation": 1, "channel": "http-bearer",
                     "auth_status": "unverified", "checked_at": None, "evidence_refs": []})
-            task = store.put("task", self.run_id, {"opportunity_ref": None, "role": "research", "briefing": launch.briefing,
+            opportunity = None
+            if launch.research:
+                opportunity = frontier.propose(store, self.run_id, {
+                    "question": launch.briefing, "lane": "expand", "target_refs": [ref(a) for a in assets.values()],
+                    "basis_refs": [ref(a) for a in assets.values()], "prerequisite_conditions": [],
+                    "expected_outcomes": ["Evidence-backed understanding and useful follow-up questions"],
+                    "method_family": frontier.METHOD, "priority": "normal", "reason": "User research task", "revisit_condition": None})
+                opportunity = store.update(opportunity, state="running")
+            task = store.put("task", self.run_id, {"opportunity_ref": ref(opportunity) if opportunity else None, "role": "research", "briefing": launch.briefing,
                 "allowed_tools": list(TOOLS.values()), "prerequisites": [], "read_set": list(spec["identity_refs"]),
-                "write_set": ["observation"], "allocated_budget": self.budget, "state": "queued", "result_ref": None, "outcome": None})
+                "write_set": product.WRITABLE if launch.product else frontier.WRITABLE if launch.research else ["observation"], "allocated_budget": self.budget, "state": "queued", "result_ref": None, "outcome": None})
             task = store.update(task, state="running")
             attempt = store.put("attempt", self.run_id, {"task_ref": ref(task), "attempt_no": 1, "owner": new_id("host"),
                 "generation": 1, "lease_until": None, "state": "running", "stop_reason": None, "usage": {}})
@@ -188,11 +226,108 @@ class Host:
             "allowed_tools": list(TOOLS.values()), "identity_refs": spec["identity_refs"], "budget_reservation": "task:"+task["id"], "lease_generation": 1,
             "grant": {"policy_version": spec["runtime_profile"]["policy_version"], "scope": deepcopy(spec["scope"]),
                       **{k: deepcopy(p[k]) for k in ("allowed_impacts", "identity_policy", "network", "mutation_policy", "cleanup")}, "valid_until": valid_until}}
-        store.audit(self.run_id, "context", {"context": self.context, "execution": launch.execution, "prompt_version": PROMPT_VERSION,
-                    "tools_digest": hashlib.sha256(encoded(TOOL_DEFINITIONS)).hexdigest(), "mode": spec["runtime_profile"]["mode"]})
+        store.audit(self.run_id, "context", {"context": self.context, "execution": launch.execution,
+                    "prompt_version": product.PROMPT_VERSION if launch.product else frontier.PROMPT_VERSION if launch.research else PROMPT_VERSION,
+                    "method": self.method, "usage_start": store.usage(self.run_id),
+                    "tools_digest": hashlib.sha256(encoded(self.tools)).hexdigest(), "mode": spec["runtime_profile"]["mode"]})
+        if opportunity:
+            store.audit(self.run_id, "dispatch", {"task_ref": ref(task), "opportunity_ref": ref(opportunity),
+                        "lane": opportunity["data"]["lane"], "round": 1})
         self.bridge = TransportBridge(self)
         self.http = HttpExecutor(launch.transport, self.bridge, self.run_id, secrets)
         self.http.deadline = self.deadline
+
+    def messages(self):
+        from karst import frontier
+        task = self.store.get(self.task_id)
+        content = {"briefing": task["data"]["briefing"], "entrypoints": self.launch.spec["entrypoints"],
+                   "identities": [{"label": k, "identity_ref": ref(v)} for k, v in self.identity_by_label.items()],
+                   "budget": task["data"]["allocated_budget"]}
+        if self.launch.research:
+            content.update(task_ref=ref(task), opportunity=self.store.get(task["data"]["opportunity_ref"]["id"]) if task["data"]["opportunity_ref"] else None,
+                           read_set=[self.store.resolve(r, self.run_id) for r in task["data"]["read_set"]],
+                           methods=[self.method], run_usage=self.store.usage(self.run_id),
+                           run_briefing=self.launch.briefing,
+                           research_history=frontier.history(self.store, self.run_id, self.task_id))
+        system = frontier.SYSTEM if self.launch.research else SYSTEM
+        if self.launch.product:
+            from karst import product
+            content["role"] = task["data"]["role"]
+            if content["role"] == "verify":
+                content["evidence_sources"] = [{"evidence_ref": r, "url": x["request"]["url"], "identity": x["request"]["identity"]}
+                    for r in task["data"]["read_set"] if r["kind"] == "evidence"
+                    for _, _, x, _ in [product.material(self.store, self.run_id, r)]]
+            system = product.VERIFY_SYSTEM if content["role"] == "verify" else product.SYSTEM
+        return [{"role": "system", "content": system},
+                {"role": "user", "content": json.dumps(content, ensure_ascii=False)}]
+
+    def next_task(self):
+        """End one opportunity and allocate the next within the original Run."""
+        from karst import frontier
+        store = self.store
+        with store.atomic():
+            old = store.get(self.task_id)
+            if old["data"]["opportunity_ref"]:
+                opportunity = store.get(old["data"]["opportunity_ref"]["id"])
+                state = "resolved" if old["data"]["state"] == "delivered" and old["data"]["outcome"] == "progress" else "exhausted"
+                attempt = store.get(self.attempt_id)
+                store.update(opportunity, state=state,
+                             wait_reason=attempt["data"]["stop_reason"] if old["data"]["state"] == "failed" else None)
+            review = None
+            if self.launch.product:
+                from karst import product
+                product.close_failed_review(store, self.run_id, old)
+                review = product.select_review(self)
+            selected = None if review else frontier.select(self)
+            if selected is None and review is None:
+                return False
+            used = store.usage(self.run_id)["charged_or_reserved"]
+            total = self.launch.spec["budget"]
+            allocation = {k: min(v, total[k]-used.get(k, 0)) for k, v in self.launch.spec["scheduling"]["per_task_budget"].items() if k != "cost_limit"}
+            allocation["wall_seconds"] = min(allocation["wall_seconds"], int(self.run_deadline-time.monotonic()))
+            if any(v <= 0 for v in allocation.values()):
+                raise KarstError("budget_exhausted")
+            allocation["cost_limit"] = None
+            if review:
+                data = {"question": "Independently verify the assigned object-read boundary candidate", "lane": "verify", "prerequisite_conditions": []}
+                read_set = product.review_read_set(store, self.run_id, review)
+            else:
+                selected = store.update(selected, state="running")
+                data = selected["data"]
+                read_set = frontier.union_refs(data["target_refs"], data["basis_refs"])
+            role = "verify" if review else "research"
+            tools = tool_definitions(True, product=self.launch.product, role=role)
+            allowed = [TOOLS[t["function"]["name"]] for t in tools]
+            task = store.put("task", self.run_id, {"opportunity_ref": ref(selected) if selected else None, "role": role,
+                "briefing": data["question"], "allowed_tools": allowed,
+                "prerequisites": data["prerequisite_conditions"], "read_set": read_set,
+                "write_set": ["verification"] if review else product.WRITABLE if self.launch.product else frontier.WRITABLE, "allocated_budget": allocation,
+                "state": "queued", "result_ref": None, "outcome": None})
+            task = store.update(task, state="running")
+            attempt = store.put("attempt", self.run_id, {"task_ref": ref(task), "attempt_no": 1, "owner": self.owner,
+                "generation": 1, "lease_until": None, "state": "running", "stop_reason": None, "usage": {}})
+            store.audit(self.run_id, "dispatch", {"task_ref": ref(task), "opportunity_ref": ref(selected) if selected else None,
+                "lane": data["lane"], "round": 1+sum(a["kind"] == "dispatch" for a in store.audits(self.run_id))})
+        self.task_id, self.attempt_id = task["id"], attempt["id"]
+        self.usage_start = used
+        # reserve() charges one Run ledger. These cumulative caps additionally
+        # limit this task to its allocation without refunding earlier tasks.
+        self.budget = {k: used.get(k, 0)+v if v is not None else None for k, v in allocation.items()}
+        self.deadline = min(self.run_deadline, time.monotonic()+allocation["wall_seconds"])
+        self.context.update(task_ref=ref(task), attempt_ref=ref(attempt), budget_reservation="task:"+task["id"])
+        self.context["allowed_tools"] = allowed
+        self.tools = tools
+        self.schemas = {t["function"]["name"]: t["function"]["parameters"] for t in tools}
+        self.context["grant"]["valid_until"] = (datetime.now(timezone.utc)+timedelta(seconds=allocation["wall_seconds"])).isoformat().replace("+00:00", "Z")
+        self.model_request_id, self.fatal = None, None
+        self.read_bytes = 0
+        self.http = HttpExecutor(self.launch.transport, self.bridge, self.run_id, self.secrets)
+        self.http.deadline = self.deadline
+        store.audit(self.run_id, "context", {"context": self.context, "execution": self.launch.execution,
+                    "prompt_version": product.PROMPT_VERSION if self.launch.product else frontier.PROMPT_VERSION, "method": self.method,
+                    "usage_start": store.usage(self.run_id),
+                    "tools_digest": hashlib.sha256(encoded(self.tools)).hexdigest(), "mode": self.launch.spec["runtime_profile"]["mode"]})
+        return True
 
     def guard(self):
         if self.cancelled:
@@ -206,6 +341,13 @@ class Host:
             raise KarstError("inactive or changed configuration")
         if task["data"]["state"] != "running" or attempt["data"]["state"] != "running" or attempt["data"]["owner"] != self.owner or attempt["data"]["generation"] != self.context["lease_generation"]:
             raise KarstError("inactive or stale attempt")
+        if self.launch.research:
+            from karst.frontier import ready_check
+            if task["data"]["opportunity_ref"]:
+                ready_check(self, self.store.get(task["data"]["opportunity_ref"]["id"]))
+            if self.launch.product:
+                from karst.product import guard_product
+                guard_product(self, task)
 
     def view(self, reference):
         exchange = json.loads(self.store.evidence_bytes(reference, self.run_id))
@@ -228,11 +370,12 @@ class Host:
         with self.store.atomic():
             self.store.db.execute("INSERT INTO calls VALUES(?,?,?,?,?,NULL)", (self.run_id, self.attempt_id, call.id, fingerprint, "running"))
         start = self.store.audit(self.run_id, "tool_start", {"call_id": call.id, "name": call.name, "arguments": call.arguments,
-                                "arguments_digest": fingerprint, "model_request_id": self.model_request_id})
+                                "arguments_digest": fingerprint, "model_request_id": self.model_request_id,
+                                "task_ref": self.context["task_ref"], "attempt_ref": self.context["attempt_ref"]})
         try:
             if call.name not in TOOLS or TOOLS[call.name] not in self.context["allowed_tools"]:
                 raise KarstError("unsupported_tool")
-            exact(call.arguments, SCHEMAS[call.name]["properties"])
+            exact(call.arguments, self.schemas[call.name]["properties"])
             # Includes all admitted control/read calls; invalid calls are additionally
             # limited by model request and correction budgets.
             key = "tool:"+str(start["sequence"])
@@ -247,7 +390,8 @@ class Host:
         with self.store.atomic():
             self.store.db.execute("UPDATE calls SET state='done',reply=? WHERE run_id=? AND attempt_id=? AND call_id=?",
                                   (encoded(reply).decode(), self.run_id, self.attempt_id, call.id))
-            self.store.audit(self.run_id, "tool_end", {"call_id": call.id, "name": call.name, "reply": reply})
+            self.store.audit(self.run_id, "tool_end", {"call_id": call.id, "name": call.name, "reply": reply,
+                            "task_ref": self.context["task_ref"], "attempt_ref": self.context["attempt_ref"]})
         return reply
 
     def _execute(self, call):
@@ -269,7 +413,16 @@ class Host:
             if a["query"]:
                 parts = urlsplit(url)
                 url = urlunsplit((parts.scheme, parts.netloc, parts.path, (parts.query+"&" if parts.query else "")+urlencode(a["query"]), ""))
-            op = self.http.request(url, identity)
+            inputs = []
+            if self.launch.product:
+                from karst.product import request_inputs, material
+                inputs = request_inputs(self, url, a["identity_ref"])
+                self.active_capability_refs = inputs
+                self.parent_operation_ref = ref(material(self.store, self.run_id, self.store.resolve(inputs[0], self.run_id)["data"]["evidence_refs"][0])[1]) if inputs else None
+            try:
+                op = self.http.request(url, identity)
+            finally:
+                self.active_capability_refs, self.parent_operation_ref = [], None
             formal = self.store.get(op["id"])
             d = formal["data"]
             preview = None
@@ -284,8 +437,12 @@ class Host:
                 self.fatal = "unknown_execution_or_save_failure"
             if d["error"] and d["error"]["code"] == "budget_exhausted":
                 self.fatal = "budget_exhausted"
-            return {"operation_ref": ref(formal), "execution_state": d["execution_state"], "evidence_refs": d["evidence_refs"],
-                    "preview": preview, "usage": d["usage"], "error": d["error"]}
+            reply = {"operation_ref": ref(formal), "execution_state": d["execution_state"], "evidence_refs": d["evidence_refs"],
+                     "preview": preview, "usage": d["usage"], "error": d["error"]}
+            if self.launch.product:
+                from karst.product import observe_access
+                reply["capability_ref"] = observe_access(self, formal, inputs)
+            return reply
         if call.name == "evidence_read":
             if type(a["offset"]) is not int or a["offset"] < 0:
                 raise KarstError("invalid read offset")
@@ -303,7 +460,7 @@ class Host:
         if call.name == "session_inspect":
             return {"identities": [{"identity_ref": ref(i), "label": label, "session": self.store.get(self.session_by_identity[i["id"]]["id"])} for label, i in self.identity_by_label.items()]}
         if call.name == "state_query":
-            if not isinstance(a["kind"], str) or a["kind"] not in FIELDS:
+            if not isinstance(a["kind"], str) or a["kind"] not in (FIELDS if self.launch.research else I0_KINDS):
                 raise KarstError("unsupported record query")
             if type(a["cursor"]) is not int or a["cursor"] < 0:
                 raise KarstError("invalid cursor")
@@ -316,13 +473,13 @@ class Host:
             return {"records": page, "next_cursor": end if end < len(rows) else None}
         endpoint = "publish" if call.name == "publish_research" else "final"
         run, task, attempt = (self.store.get(i) for i in (self.run_id, self.task_id, self.attempt_id))
-        envelope = {"schema_version": "karst-design/1", "request_id": call.id, "run_ref": ref(run), "task_ref": ref(task),
+        envelope = {"schema_version": "karst-design/1", "request_id": self.attempt_id+":"+call.id if self.launch.research else call.id, "run_ref": ref(run), "task_ref": ref(task),
                     "attempt_ref": ref(attempt), "expected_versions": [ref(run), ref(task), ref(attempt)], "payload": a}
         try:
             return self.store.receive(endpoint, envelope, owner=self.owner, generation=1)
         except KarstError as exc:
             sequence = self.store.db.execute("SELECT COALESCE(MAX(sequence),0) FROM changes WHERE run_id=?", (self.run_id,)).fetchone()[0]
-            rejected = {"request_id": call.id, "proposal_digest": digest(envelope), "status": "rejected", "result_ref": None,
+            rejected = {"request_id": envelope["request_id"], "proposal_digest": digest(envelope), "status": "rejected", "result_ref": None,
                         "local_ref_map": {}, "state_version": sequence, "error": {"code": "PROPOSAL_REJECTED", "field": "/payload", "message": str(exc)}}
             self.store.audit(self.run_id, "proposal_rejected", {"receipt": rejected})
             return rejected
@@ -333,68 +490,125 @@ class Host:
             if task["data"]["state"] == "running":
                 self.store.update(task, state="cancelled" if reason == "user_pause" else "failed", outcome="inconclusive")
             if attempt["data"]["state"] == "running":
-                self.store.update(attempt, state="cancelled" if reason == "user_pause" else "failed", stop_reason=reason, usage=self.store.usage(self.run_id))
+                self.store.update(attempt, state="cancelled" if reason == "user_pause" else "failed", stop_reason=reason, usage=self.store.attempt_usage(self.run_id, self.attempt_id))
+            blocking = []
+            if self.launch.research:
+                opportunity = self.store.get(task["data"]["opportunity_ref"]["id"]) if task["data"]["opportunity_ref"] else None
+                if opportunity and opportunity["data"]["state"] == "running":
+                    self.store.update(opportunity, state="resolved" if task["data"]["state"] == "delivered" and task["data"]["outcome"] == "progress" else "exhausted",
+                                      wait_reason=None if task["data"]["state"] == "delivered" else reason)
+                blocking = [ref(o) for o in self.store.records(self.run_id, "opportunity")
+                            if o["data"]["state"] in ("proposed", "ready", "waiting", "deferred")]
+                if self.launch.product:
+                    from karst.product import close_failed_review
+                    close_failed_review(self.store, self.run_id, self.store.get(self.task_id))
             self.store.update(run, state="paused" if reason == "user_pause" else ("failed" if reason == "unrecoverable_error" else "stopped"),
-                              stop_reason={"code": reason, "message": message, "blocking_refs": []})
+                              stop_reason={"code": reason, "message": message, "blocking_refs": blocking})
+
+
+def run_task(h, gateway):
+    """One continuous conversation, reused by I0 and multi-task research."""
+    store, launch = h.store, h.launch
+    messages = h.messages()
+    corrections = 0
+    while True:
+        h.guard()
+        if launch.product:
+            used = store.usage(h.run_id)["charged_or_reserved"]
+            remaining = min(h.budget["model_requests"], launch.spec["budget"]["model_requests"]) - used.get("model_requests", 0)
+            if 0 < remaining <= 3:
+                messages.append({"role": "user", "content": "Runtime budget: at most "+str(remaining)+
+                    " model requests remain for this Task, including the next response. Use saved evidence to "
+                    "submit_result now, with unresolved questions/limits. Keep proposed_records a native array "
+                    "of complete local_ref,kind,data records. Do not repeat reads merely to restate saved facts."})
+        try:
+            reply = gateway.generate(messages, h.tools)
+        except ProtocolError as exc:
+            corrections += 1
+            store.audit(h.run_id, "model_response_rejected", {"task_ref": h.context["task_ref"],
+                        "attempt_ref": h.context["attempt_ref"], "code": exc.code, "correction": corrections})
+            if corrections > launch.spec["scheduling"]["max_corrections"]:
+                raise KarstError("correction_limit") from exc
+            guidance = " Return complete valid tool calls; no tools from that response executed."
+            if exc.code in ("TOKEN_LIMIT", "TRUNCATED_TOOL_CALLS"):
+                guidance += (" Reduce the output: send one small complete call, publish records in small batches, "
+                             "reuse accepted references, and keep the final focused on this task's required facts and evidence. "
+                             "Do not repeat HTTP work or replay a partial tool call. Report missing facts honestly.")
+            messages.append({"role": "user", "content": "Previous response was rejected: "+exc.code+"."+guidance})
+            continue
+        h.model_request_id = reply.request_id
+        if not reply.tool_calls:
+            corrections += 1
+            if corrections > launch.spec["scheduling"]["max_corrections"]:
+                raise KarstError("correction_limit")
+            messages += [reply.to_assistant_message(), {"role": "user", "content": "Use tools to investigate and submit evidence-backed observations. Plain text does not complete the task."}]
+            continue
+        if any(c.name == "submit_result" for c in reply.tool_calls) and len(reply.tool_calls) != 1:
+            results = {c.id: {"error": {"code": "submit_must_be_exclusive"}} for c in reply.tool_calls}
+        else:
+            results = {}
+            for call in reply.tool_calls:
+                if h.fatal:
+                    results[call.id] = {"error": {"code": h.fatal}}
+                    store.audit(h.run_id, "tool_end", {"call_id": call.id, "name": call.name, "reply": results[call.id], "not_dispatched": True})
+                else:
+                    try:
+                        results[call.id] = h.execute(call)
+                    except KarstError as exc:
+                        h.fatal = str(exc)
+                        results[call.id] = {"error": {"code": str(exc)}}
+                        store.audit(h.run_id, "tool_end", {"call_id": call.id, "name": call.name, "reply": results[call.id], "not_dispatched": True})
+        messages = append_tool_results(messages, reply, results)
+        if store.get(h.task_id)["data"]["state"] == "delivered":
+            return
+        if any(r.get("error") for r in results.values()):
+            corrections += 1
+            if corrections > launch.spec["scheduling"]["max_corrections"]:
+                raise KarstError("correction_limit")
 
 
 def run(config_path, gateway_path, data_dir, *, gateway_factory=Gateway, allow_mock=False):
     launch = load_launch(config_path)
     if launch.spec["runtime_profile"]["mode"] != "live" and not allow_mock:
         raise KarstError("CLI run requires live mode; mock is only available to explicit development tests")
-    gateway_config = load_gateway(gateway_path)
+    gateway_config = load_gateway(gateway_path or default_gateway_path(research=launch.research))
     secrets = credential_values(launch.transport)
     with host_lock(data_dir), ResearchStore(data_dir) as store:
         if store.db.execute("SELECT 1 FROM records LIMIT 1").fetchone():
             raise KarstError("I0 requires a fresh data directory per Run")
         h = Host(launch, store, secrets)
-        messages = [{"role": "system", "content": SYSTEM}, {"role": "user", "content": json.dumps({"briefing": launch.briefing,
-                    "entrypoints": launch.spec["entrypoints"], "identities": [{"label": k, "identity_ref": ref(v)} for k, v in h.identity_by_label.items()],
-                    "budget": h.budget}, ensure_ascii=False)}]
+        if launch.product:
+            from karst import product, __version__
+            store.audit(h.run_id, "runtime_manifest", {"program_version": __version__,
+                "source_sha256": {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(Path(__file__).parent.glob("*.py"))},
+                "gateway_config_sha256": hashlib.sha256(encoded(gateway_config)).hexdigest(), "model": gateway_config["model"],
+                "launch_sha256": hashlib.sha256(encoded({"spec": launch.spec, "execution": launch.execution, "briefing": launch.briefing})).hexdigest(),
+                "prompt_sha256": {"research": hashlib.sha256(product.SYSTEM.encode()).hexdigest(), "verify": hashlib.sha256(product.VERIFY_SYSTEM.encode()).hexdigest()}})
         reason, detail = "unrecoverable_error", "research loop did not complete"
         try:
             gateway = gateway_factory(gateway_config, store, h.run_id, h.budget, h.deadline, check=h.guard)
-            corrections = 0
             while True:
-                h.guard()
+                task_error = None
                 try:
-                    reply = gateway.generate(messages, TOOL_DEFINITIONS)
-                except ProtocolError as exc:
-                    corrections += 1
-                    if corrections > launch.spec["scheduling"]["max_corrections"]:
-                        raise KarstError("correction_limit") from exc
-                    messages.append({"role": "user", "content": "Previous response was rejected: "+exc.code+". Return complete valid tool calls; no tools from that response executed."})
-                    continue
-                h.model_request_id = reply.request_id
-                if not reply.tool_calls:
-                    corrections += 1
-                    if corrections > launch.spec["scheduling"]["max_corrections"]:
-                        raise KarstError("correction_limit")
-                    messages += [reply.to_assistant_message(), {"role": "user", "content": "Use tools to investigate and submit evidence-backed observations. Plain text does not complete the task."}]
-                    continue
-                if any(c.name == "submit_result" for c in reply.tool_calls) and len(reply.tool_calls) != 1:
-                    results = {c.id: {"error": {"code": "submit_must_be_exclusive"}} for c in reply.tool_calls}
-                else:
-                    results = {}
-                    for call in reply.tool_calls:
-                        if h.fatal:
-                            results[call.id] = {"error": {"code": h.fatal}}
-                            store.audit(h.run_id, "tool_end", {"call_id": call.id, "name": call.name, "reply": results[call.id], "not_dispatched": True})
-                        else:
-                            try:
-                                results[call.id] = h.execute(call)
-                            except KarstError as exc:
-                                h.fatal = str(exc)
-                                results[call.id] = {"error": {"code": str(exc)}}
-                                store.audit(h.run_id, "tool_end", {"call_id": call.id, "name": call.name, "reply": results[call.id], "not_dispatched": True})
-                messages = append_tool_results(messages, reply, results)
-                if store.get(h.task_id)["data"]["state"] == "delivered":
-                    reason, detail = "frontier_exhausted", "I0 task delivered; no global security coverage or capability conclusion"
+                    run_task(h, gateway)
+                except KarstError as exc:
+                    if (not launch.research or str(exc) not in ("budget_exhausted", "correction_limit")
+                            or h.fatal not in (None, "budget_exhausted")):
+                        raise
+                    task_error = str(exc)
+                    store.audit(h.run_id, "task_failed", {"task_ref": h.context["task_ref"],
+                                "attempt_ref": h.context["attempt_ref"], "code": task_error})
+                    with store.atomic():
+                        task, attempt = (store.get(i) for i in (h.task_id, h.attempt_id))
+                        store.update(task, state="failed", outcome="inconclusive")
+                        store.update(attempt, state="failed", stop_reason=task_error,
+                                     usage=store.attempt_usage(h.run_id, h.attempt_id))
+                if not launch.research or not h.next_task():
+                    reason = "budget_exhausted" if task_error == "budget_exhausted" else "frontier_exhausted"
+                    detail = ("No executable research opportunities remain; failures and waiting items are retained"
+                              if launch.research else "I0 task delivered; no global security coverage or capability conclusion")
                     break
-                if any(r.get("error") for r in results.values()):
-                    corrections += 1
-                    if corrections > launch.spec["scheduling"]["max_corrections"]:
-                        raise KarstError("correction_limit")
+                gateway = gateway_factory(gateway_config, store, h.run_id, h.budget, h.deadline, check=h.guard)
         except KeyboardInterrupt:
             h.cancelled = True
             reason, detail = "user_pause", "interrupted; no new tools dispatched; inspect retained operations"
@@ -422,11 +636,25 @@ def export(data_dir, run_id, output):
     # Full transcript is private; exported report includes formal records and audit metadata.
     result["audit"] = [{k: v for k, v in a.items() if k not in ("messages", "message", "arguments", "reply", "tools", "context")} for a in result["audit"]]
     (destination/"run.json").write_text(json.dumps(result, ensure_ascii=False, indent=2)+"\n", encoding="utf-8")
+    if result["run"]["spec"]["runtime_profile"]["support_matrix_ref"] == "support:product-v1":
+        from karst.product_report import export_report
+        return export_report(result, destination)
     observations = [r for r in result["records"] if r["kind"] == "observation"]
-    lines = ["# Karst I0 正常业务调查记录", "", "Run: `"+run_id+"`", "", "本记录不包含漏洞发现或权限突破结论。", "",
+    research_mode = result["run"]["spec"]["runtime_profile"]["support_matrix_ref"] == "support:research-v1"
+    lines = ["# Karst "+("多任务研究记录" if research_mode else "I0 正常业务调查记录"), "", "Run: `"+run_id+"`", "", "本记录不包含漏洞发现或权限突破结论。", "",
              "状态："+result["run"]["state"], "停止原因："+result["run"]["stop_reason"]["message"], ""]
     for observation in observations:
         lines.extend([observation["data"]["statement"], "", "证据："+", ".join(r["id"] for r in observation["data"]["evidence_refs"]), ""])
+    if research_mode:
+        for kind, title in (("hypothesis", "待验证假设"), ("opportunity", "研究机会")):
+            lines.extend(["## "+title, ""])
+            for record in result["records"]:
+                if record["kind"] == kind:
+                    data = record["data"]
+                    lines.extend([data["question"], "", "状态："+data.get("state", data.get("status", "")),
+                                  "依据："+", ".join(r["id"] for r in data["basis_refs"]), ""])
+                    if data.get("wait_reason"):
+                        lines.extend(["等待原因："+data["wait_reason"], ""])
     (destination/"report.md").write_text("\n".join(lines), encoding="utf-8")
     return {"run_id": run_id, "output": str(destination), "files": ["run.json", "report.md"]}
 
@@ -444,6 +672,8 @@ def reconcile(data_dir, run_id):
                     store.update(r, state="unknown", stop_reason="interrupted", usage=store.usage(run_id))
                 elif r["kind"] == "task" and r["data"]["state"] == "running":
                     store.update(r, state="failed", outcome="inconclusive")
+                elif r["kind"] == "opportunity" and r["data"]["state"] == "running":
+                    store.update(r, state="exhausted", wait_reason="interrupted_requires_reconciliation")
             store.db.execute("UPDATE calls SET state='unknown' WHERE run_id=? AND state='running'", (run_id,))
             store.update(run_record, state="stopped", stop_reason={"code": "unrecoverable_error", "message": "interrupted state reconciled without I/O; resume unsupported", "blocking_refs": []})
         return store.status(run_id)
