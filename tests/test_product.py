@@ -211,6 +211,11 @@ class ProductTests(unittest.TestCase):
                 if call["function"]["name"] == "publish_research":
                     proposal = json.loads(call["function"]["arguments"])
                     proposal["suggested_opportunities"] = []
+                    proposal["proposed_records"].append({"local_ref": "immediate-rule", "kind": "hypothesis", "data": {
+                        "question": "Which rule applies to the resource just read through the parent link?",
+                        "basis_refs": replies["immediate"]["evidence_refs"],
+                        "alternative_explanations": ["The parent policy may not apply to this resource"],
+                        "missing_conditions": ["Explicit read policy for the newly read resource"]}})
                     call["function"]["arguments"] = json.dumps(proposal)
             return response
         result, _, _, scored, _ = self.run_model("P2", immediate)

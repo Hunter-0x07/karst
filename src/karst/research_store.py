@@ -352,6 +352,9 @@ class ResearchStore:
             elif research:
                 from karst.frontier import accept_research
                 mapping, payload = accept_research(self, run, task, payload)
+            if product and endpoint == "final" and task["data"]["role"] == "research":
+                from karst.product import require_rule_assessment
+                require_rule_assessment(self, run_id, task)
             # I0 has no cross-proposal local links: each observation cites existing material.
             result = self.put("result", run_id, {"submission_kind": endpoint, "task_ref": ref(task), "attempt_ref": ref(attempt),
                 "proposal_digest": proposal_digest, "payload": payload, "accepted_refs": list(mapping.values())})

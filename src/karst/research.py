@@ -45,6 +45,7 @@ SCHEMAS = {
     "publish_research": PAYLOAD, "submit_result": PAYLOAD,
 }
 DESCRIPTIONS = {
+    "document_inspect": "Inspect complete saved text/html evidence for static links and GET form query pairs without HTTP. Cite the source evidence. Only supported in-scope links/forms are navigation hints, never permissions or security rules. No scripts or automatic submission.",
     "http_request": "Perform one authorized GET (redirects counted separately). Use only discovered URLs, managed identity Ref or null. query preserves duplicate parameters. Returns evidence refs and a bounded body preview.",
     "evidence_read": "Read a saved response body without a network request. Byte offsets address the UTF-8 redacted body view. Read beyond preview to obtain omitted facts; cite evidence_ref.",
     "session_inspect": "List provided identity refs and current session metadata. unverified means authentication must be checked against actual application responses.",
@@ -167,6 +168,17 @@ class TransportBridge:
 
 class Host:
     def __init__(self, launch, store, secrets):
+        self.configure(launch, store, secrets)
+        from karst import frontier, product
+        self.run_id = new_id("run")
+        identity_ids = {i.name: new_id("identity") for i in launch.transport.identities}
+        spec = deepcopy(launch.spec)
+        spec["identity_refs"] = [{"kind": "identity", "id": i, "version": 1} for i in identity_ids.values()]
+        spec["policy"]["identity_policy"]["allowed_identity_refs"] = deepcopy(spec["identity_refs"])
+        with store.atomic():
+            self.create_run(launch, store, spec, identity_ids, frontier, product)
+
+    def configure(self, launch, store, secrets, *, active_seconds=0):
         self.launch, self.store, self.secrets = launch, store, secrets
         from karst import frontier
         self.schemas = frontier.schemas(SCHEMAS, obj, REF_SCHEMA) if launch.research else SCHEMAS
@@ -177,7 +189,9 @@ class Host:
         self.method = frontier.method_pack() if launch.research else None
         self.budget = launch.spec["scheduling"]["per_task_budget"]
         self.usage_start = {}
-        self.run_deadline = time.monotonic()+launch.spec["budget"]["wall_seconds"]
+        self.invocation_started = time.monotonic()
+        self.active_seconds = active_seconds
+        self.run_deadline = self.invocation_started+launch.spec["budget"]["wall_seconds"]-active_seconds
         self.deadline = min(self.run_deadline, time.monotonic()+self.budget["wall_seconds"])
         self.cancelled = False
         self.read_bytes = 0
@@ -185,11 +199,8 @@ class Host:
         self.active_capability_refs, self.parent_operation_ref = [], None
         self.fatal = None
         self.identity_by_label, self.session_by_identity = {}, {}
-        self.run_id = new_id("run")
-        identity_ids = {i.name: new_id("identity") for i in launch.transport.identities}
-        spec = deepcopy(launch.spec)
-        spec["identity_refs"] = [{"kind": "identity", "id": i, "version": 1} for i in identity_ids.values()]
-        spec["policy"]["identity_policy"]["allowed_identity_refs"] = deepcopy(spec["identity_refs"])
+
+    def create_run(self, launch, store, spec, identity_ids, frontier, product):
         with store.atomic():
             run = store.put("run", self.run_id, {"state": "created", "stop_reason": None, "config_version": 1, "spec": spec}, record_id=self.run_id)
             assets = {}
@@ -212,7 +223,7 @@ class Host:
                     "method_family": frontier.METHOD, "priority": "normal", "reason": "User research task", "revisit_condition": None})
                 opportunity = store.update(opportunity, state="running")
             task = store.put("task", self.run_id, {"opportunity_ref": ref(opportunity) if opportunity else None, "role": "research", "briefing": launch.briefing,
-                "allowed_tools": list(TOOLS.values()), "prerequisites": [], "read_set": list(spec["identity_refs"]),
+                "allowed_tools": [TOOLS[t["function"]["name"]] for t in self.tools], "prerequisites": [], "read_set": list(spec["identity_refs"]),
                 "write_set": product.WRITABLE if launch.product else frontier.WRITABLE if launch.research else ["observation"], "allocated_budget": self.budget, "state": "queued", "result_ref": None, "outcome": None})
             task = store.update(task, state="running")
             attempt = store.put("attempt", self.run_id, {"task_ref": ref(task), "attempt_no": 1, "owner": new_id("host"),
@@ -223,7 +234,7 @@ class Host:
         valid_until = (datetime.now(timezone.utc)+timedelta(seconds=self.budget["wall_seconds"])).isoformat().replace("+00:00", "Z")
         p = spec["policy"]
         self.context = {"run_ref": ref(run), "task_ref": ref(task), "attempt_ref": ref(attempt), "config_version": 1,
-            "allowed_tools": list(TOOLS.values()), "identity_refs": spec["identity_refs"], "budget_reservation": "task:"+task["id"], "lease_generation": 1,
+            "allowed_tools": task["data"]["allowed_tools"], "identity_refs": spec["identity_refs"], "budget_reservation": "task:"+task["id"], "lease_generation": 1,
             "grant": {"policy_version": spec["runtime_profile"]["policy_version"], "scope": deepcopy(spec["scope"]),
                       **{k: deepcopy(p[k]) for k in ("allowed_impacts", "identity_policy", "network", "mutation_policy", "cleanup")}, "valid_until": valid_until}}
         store.audit(self.run_id, "context", {"context": self.context, "execution": launch.execution,
@@ -234,7 +245,7 @@ class Host:
             store.audit(self.run_id, "dispatch", {"task_ref": ref(task), "opportunity_ref": ref(opportunity),
                         "lane": opportunity["data"]["lane"], "round": 1})
         self.bridge = TransportBridge(self)
-        self.http = HttpExecutor(launch.transport, self.bridge, self.run_id, secrets)
+        self.http = HttpExecutor(launch.transport, self.bridge, self.run_id, self.secrets)
         self.http.deadline = self.deadline
 
     def messages(self):
@@ -412,7 +423,7 @@ class Host:
                 raise KarstError("invalid_query_pairs")
             if a["query"]:
                 parts = urlsplit(url)
-                url = urlunsplit((parts.scheme, parts.netloc, parts.path, (parts.query+"&" if parts.query else "")+urlencode(a["query"]), ""))
+                url = urlunsplit((parts.scheme, parts.netloc, parts.path, (parts.query+"&" if parts.query else "")+urlencode([tuple(pair) for pair in a["query"]]), ""))
             inputs = []
             if self.launch.product:
                 from karst.product import request_inputs, material
@@ -442,6 +453,12 @@ class Host:
             if self.launch.product:
                 from karst.product import observe_access
                 reply["capability_ref"] = observe_access(self, formal, inputs)
+                source_url = None
+                if d["evidence_refs"]:
+                    source_url = json.loads(self.store.evidence_bytes(d["evidence_refs"][0], self.run_id))["request"]["url"]
+                    if any(secret in source_url for secret in self.secrets.values()):
+                        source_url = None
+                reply["request_url"] = source_url
             return reply
         if call.name == "evidence_read":
             if type(a["offset"]) is not int or a["offset"] < 0:
@@ -457,6 +474,20 @@ class Host:
             return {"evidence_ref": a["evidence_ref"], "offset": a["offset"], "returned_bytes": len(part), "total_view_bytes": len(raw),
                     "body_text": part.decode("utf-8", errors="replace"), "next_offset": a["offset"]+len(part),
                     "view_sha256": hashlib.sha256(raw).hexdigest(), "redacted": True, "target_requests": 0}
+        if call.name == "document_inspect":
+            from karst.navigation import inspect
+            from karst.product import material
+            _, _, exchange, _ = material(self.store, self.run_id, a["evidence_ref"])
+            headers = exchange["response"]["headers"]
+            media = next((v for k, v in headers if k.lower() == "content-type"), "") if isinstance(headers, list) else next((v for k, v in headers.items() if k.lower() == "content-type"), "")
+            if media.split(";", 1)[0].strip().lower() != "text/html":
+                raise KarstError("document_inspect_requires_html")
+            raw, _ = self.view(a["evidence_ref"])
+            if self.read_bytes+len(raw) > self.launch.execution["max_total_read_bytes"]:
+                raise KarstError("budget_exhausted")
+            self.read_bytes += len(raw)
+            return dict(inspect(raw, exchange["request"]["url"], self.launch.transport.check_url),
+                        evidence_ref=a["evidence_ref"], view_sha256=hashlib.sha256(raw).hexdigest(), read_bytes=len(raw), redacted=True)
         if call.name == "session_inspect":
             return {"identities": [{"identity_ref": ref(i), "label": label, "session": self.store.get(self.session_by_identity[i["id"]]["id"])} for label, i in self.identity_by_label.items()]}
         if call.name == "state_query":
@@ -476,13 +507,52 @@ class Host:
         envelope = {"schema_version": "karst-design/1", "request_id": self.attempt_id+":"+call.id if self.launch.research else call.id, "run_ref": ref(run), "task_ref": ref(task),
                     "attempt_ref": ref(attempt), "expected_versions": [ref(run), ref(task), ref(attempt)], "payload": a}
         try:
-            return self.store.receive(endpoint, envelope, owner=self.owner, generation=1)
+            receipt = self.store.receive(endpoint, envelope, owner=self.owner, generation=1)
         except KarstError as exc:
             sequence = self.store.db.execute("SELECT COALESCE(MAX(sequence),0) FROM changes WHERE run_id=?", (self.run_id,)).fetchone()[0]
             rejected = {"request_id": envelope["request_id"], "proposal_digest": digest(envelope), "status": "rejected", "result_ref": None,
                         "local_ref_map": {}, "state_version": sequence, "error": {"code": "PROPOSAL_REJECTED", "field": "/payload", "message": str(exc)}}
+            if self.launch.product and str(exc) == "object_read_rule_assessment_missing":
+                from karst.product import rule_assessment_gaps
+                rejected["guidance"] = self.assessment_guidance(rule_assessment_gaps(self.store, self.run_id, task))
             self.store.audit(self.run_id, "proposal_rejected", {"receipt": rejected})
             return rejected
+        return self.publication_reply(receipt)
+
+    def publication_reply(self, receipt):
+        """Derived tool feedback does not change the durable delivery receipt."""
+        if not self.launch.product or receipt["status"] != "accepted":
+            return receipt
+        from karst.product import policy, rule_assessment_gaps
+        states = []
+        for local, reference in receipt["local_ref_map"].items():
+            if reference["kind"] != "security_rule":
+                continue
+            rule = self.store.resolve(reference, self.run_id, current=True)
+            state = {"local_ref": local, "record_ref": ref(rule), "status": rule["data"]["status"]}
+            if state["status"] != "supported":
+                state["resource_urls"] = [self.store.resolve(r, self.run_id, current=True)["data"]["locator"]["url"] for r in rule["data"]["applies_to_refs"]]
+                try:
+                    policy(self.store, self.run_id, rule)
+                except KarstError as exc:
+                    state["validation_error"] = str(exc)
+                state["guidance"] = ("Saved rule remains proposed. Publication acceptance does not establish rule support. "
+                    "Bind applies_to_refs to the exact executed request_url, including encoded query parameters, "
+                    "and cite an explicit applicable policy. Otherwise keep a hypothesis; do not infer a deny rule.")
+            states.append(state)
+        task = self.store.get(self.task_id)
+        return dict(receipt, record_states=states,
+                    rule_assessment_gaps=self.assessment_guidance(rule_assessment_gaps(self.store, self.run_id, task)))
+
+    @staticmethod
+    def assessment_guidance(gaps):
+        if not gaps:
+            return {"unassessed_count": 0, "resources": []}
+        return {"unassessed_count": len(gaps), "resources": gaps[:8],
+            "instruction": ("Read potential policy sources and publish a supported applicable security_rule when possible. "
+                "For a genuinely unresolved read, review and explicitly include the draft_hypothesis as a complete "
+                "local_ref,kind,data record in the native proposed_records array. No draft was automatically saved. "
+                "A summary alone does not replace the structured unknown. Do not infer a default deny rule.")}
 
     def finish(self, reason, message):
         with self.store.atomic():
@@ -502,7 +572,7 @@ class Host:
                 if self.launch.product:
                     from karst.product import close_failed_review
                     close_failed_review(self.store, self.run_id, self.store.get(self.task_id))
-            self.store.update(run, state="paused" if reason == "user_pause" else ("failed" if reason == "unrecoverable_error" else "stopped"),
+            self.store.update(run, state="paused" if reason in ("user_pause", "task_boundary_pause") else ("failed" if reason == "unrecoverable_error" else "stopped"),
                               stop_reason={"code": reason, "message": message, "blocking_refs": blocking})
 
 
@@ -567,8 +637,11 @@ def run_task(h, gateway):
                 raise KarstError("correction_limit")
 
 
-def run(config_path, gateway_path, data_dir, *, gateway_factory=Gateway, allow_mock=False):
+def run(config_path, gateway_path, data_dir, *, gateway_factory=Gateway, allow_mock=False, pause_after_tasks=None):
+    validate_pause(pause_after_tasks)
     launch = load_launch(config_path)
+    if pause_after_tasks is not None and not launch.research:
+        raise KarstError("task-boundary pause requires a multi-task research profile")
     if launch.spec["runtime_profile"]["mode"] != "live" and not allow_mock:
         raise KarstError("CLI run requires live mode; mock is only available to explicit development tests")
     gateway_config = load_gateway(gateway_path or default_gateway_path(research=launch.research))
@@ -584,8 +657,39 @@ def run(config_path, gateway_path, data_dir, *, gateway_factory=Gateway, allow_m
                 "gateway_config_sha256": hashlib.sha256(encoded(gateway_config)).hexdigest(), "model": gateway_config["model"],
                 "launch_sha256": hashlib.sha256(encoded({"spec": launch.spec, "execution": launch.execution, "briefing": launch.briefing})).hexdigest(),
                 "prompt_sha256": {"research": hashlib.sha256(product.SYSTEM.encode()).hexdigest(), "verify": hashlib.sha256(product.VERIFY_SYSTEM.encode()).hexdigest()}})
-        reason, detail = "unrecoverable_error", "research loop did not complete"
-        try:
+        return drive(h, gateway_config, gateway_factory, pause_after_tasks)
+
+
+def validate_pause(value):
+    if value is not None and (type(value) is not int or not 1 <= value <= 1000):
+        raise KarstError("pause_after_tasks must be an integer from 1 to 1000")
+
+
+def resume(config_path, gateway_path, data_dir, run_id, *, gateway_factory=Gateway, allow_mock=False, pause_after_tasks=None):
+    from karst.recovery import restore
+    validate_pause(pause_after_tasks)
+    launch = load_launch(config_path)
+    if not launch.research:
+        raise KarstError("resume requires a multi-task research profile")
+    if launch.spec["runtime_profile"]["mode"] != "live" and not allow_mock:
+        raise KarstError("CLI resume requires live mode")
+    gateway_config = load_gateway(gateway_path or default_gateway_path(research=True))
+    secrets = credential_values(launch.transport)
+    if not (Path(data_dir)/"state/research.db").is_file():
+        raise KarstError("resume requires an existing research database")
+    with host_lock(data_dir), ResearchStore(data_dir) as store:
+        h = restore(launch, store, secrets, gateway_config, run_id)
+        return drive(h, gateway_config, gateway_factory, pause_after_tasks, dispatch_first=True)
+
+
+def drive(h, gateway_config, gateway_factory, pause_after_tasks, *, dispatch_first=False):
+    store, launch = h.store, h.launch
+    reason, detail = "unrecoverable_error", "research loop did not complete"
+    checkpointed, delivered = False, 0
+    try:
+        if dispatch_first and not h.next_task():
+            reason, detail = "frontier_exhausted", "No executable research opportunities remain"
+        else:
             gateway = gateway_factory(gateway_config, store, h.run_id, h.budget, h.deadline, check=h.guard)
             while True:
                 task_error = None
@@ -603,21 +707,29 @@ def run(config_path, gateway_path, data_dir, *, gateway_factory=Gateway, allow_m
                         store.update(task, state="failed", outcome="inconclusive")
                         store.update(attempt, state="failed", stop_reason=task_error,
                                      usage=store.attempt_usage(h.run_id, h.attempt_id))
+                if task_error is None:
+                    delivered += 1
+                if launch.research and pause_after_tasks and delivered >= pause_after_tasks:
+                    from karst.recovery import checkpoint
+                    checkpoint(h, gateway_config)
+                    checkpointed = True
+                    break
                 if not launch.research or not h.next_task():
                     reason = "budget_exhausted" if task_error == "budget_exhausted" else "frontier_exhausted"
                     detail = ("No executable research opportunities remain; failures and waiting items are retained"
                               if launch.research else "I0 task delivered; no global security coverage or capability conclusion")
                     break
                 gateway = gateway_factory(gateway_config, store, h.run_id, h.budget, h.deadline, check=h.guard)
-        except KeyboardInterrupt:
-            h.cancelled = True
-            reason, detail = "user_pause", "interrupted; no new tools dispatched; inspect retained operations"
-        except (KarstError, GatewayError, OSError, sqlite3.Error) as exc:
-            reason = "budget_exhausted" if isinstance(exc, KarstError) and str(exc) == "budget_exhausted" else "unrecoverable_error"
-            detail = str(exc) if isinstance(exc, (KarstError, GatewayError)) else type(exc).__name__
-        finally:
+    except KeyboardInterrupt:
+        h.cancelled = True
+        reason, detail = "user_pause", "interrupted; no new tools dispatched; inspect retained operations"
+    except (KarstError, GatewayError, OSError, sqlite3.Error) as exc:
+        reason = "budget_exhausted" if isinstance(exc, KarstError) and str(exc) == "budget_exhausted" else "unrecoverable_error"
+        detail = str(exc) if isinstance(exc, (KarstError, GatewayError)) else type(exc).__name__
+    finally:
+        if not checkpointed:
             h.finish(reason, detail)
-        return store.status(h.run_id)
+    return store.status(h.run_id)
 
 
 def status(data_dir, run_id):
@@ -634,7 +746,7 @@ def export(data_dir, run_id, output):
         raise KarstError("export requires a separate new directory")
     destination.mkdir(parents=True, exist_ok=False)
     # Full transcript is private; exported report includes formal records and audit metadata.
-    result["audit"] = [{k: v for k, v in a.items() if k not in ("messages", "message", "arguments", "reply", "tools", "context")} for a in result["audit"]]
+    result["audit"] = [{k: v for k, v in a.items() if k not in ("messages", "message", "arguments", "reply", "tools", "context", "private_bindings")} for a in result["audit"]]
     (destination/"run.json").write_text(json.dumps(result, ensure_ascii=False, indent=2)+"\n", encoding="utf-8")
     if result["run"]["spec"]["runtime_profile"]["support_matrix_ref"] == "support:product-v1":
         from karst.product_report import export_report
@@ -662,6 +774,8 @@ def export(data_dir, run_id, output):
 def reconcile(data_dir, run_id):
     with host_lock(data_dir), ResearchStore(data_dir) as store:
         run_record = store.get(run_id, run_id=run_id)
+        if run_record["data"]["state"] == "paused" and (run_record["data"]["stop_reason"] or {}).get("code") == "task_boundary_pause":
+            return store.status(run_id)
         if run_record["data"]["state"] not in ("running", "paused"):
             raise KarstError("run does not require reconciliation")
         with store.atomic():

@@ -31,18 +31,26 @@ def main(argv=None):
     command.add_argument("--config", required=True)
     command.add_argument("--gateway", help="Gateway config; defaults to the launch profile's gateway")
     command.add_argument("--data-dir", required=True)
-    commands.add_parser("resume", help="not yet available")
+    command.add_argument("--pause-after-tasks", type=int, help="pause at a delivered task boundary after N tasks")
+    command = commands.add_parser("resume", help="continue an explicit clean task-boundary checkpoint")
+    command.add_argument("--config", required=True, help="same launch config as the original run")
+    command.add_argument("--gateway", help="same gateway config as the original run")
+    command.add_argument("--data-dir", required=True)
+    command.add_argument("--run-id", required=True)
+    command.add_argument("--pause-after-tasks", type=int)
     args = parser.parse_args(argv)
     try:
-        if args.command == "resume":
-            raise KarstError("resume is not implemented; reconcile and inspect retained evidence")
         from pathlib import Path
         formal = hasattr(args, "data_dir") and (Path(args.data_dir)/"state/research.db").is_file()
-        if args.command == "run":
+        if args.command in ("run", "resume"):
             from karst import research
-            result = research.run(args.config, args.gateway, args.data_dir)
+            options = {"pause_after_tasks": args.pause_after_tasks}
+            if args.command == "resume":
+                result = research.resume(args.config, args.gateway, args.data_dir, args.run_id, **options)
+            else:
+                result = research.run(args.config, args.gateway, args.data_dir, **options)
             print(json.dumps(result, ensure_ascii=True, indent=2))
-            return 0 if (result["run"]["state"] == "stopped"
+            return 0 if (result["run"]["state"] == "paused" and result["run"]["stop_reason"]["code"] == "task_boundary_pause") or (result["run"]["state"] == "stopped"
                          and result["run"]["stop_reason"]["code"] == "frontier_exhausted"
                          and all(r["data"]["state"] == "delivered" for r in result["records"] if r["kind"] == "task")) else 1
         if formal:

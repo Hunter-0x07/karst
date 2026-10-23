@@ -50,7 +50,7 @@
           "anonymous"
         ]
       },
-      "tool_profile_ref": "registry:product-get-v2",
+      "tool_profile_ref": "registry:product-get-v5",
       "network": {
         "egress_profile_ref": "egress:i0-launch-v1",
         "requests_per_second": 2,
@@ -106,7 +106,7 @@
     "runtime_profile": {
       "mode": "live",
       "model_config_ref": "config:product-gateway-v1",
-      "tool_profile_ref": "registry:product-get-v2",
+      "tool_profile_ref": "registry:product-get-v5",
       "support_matrix_ref": "support:product-v1",
       "dependency_lock_ref": "lock:stdlib-3.12-v1",
       "policy_version": "product-v2"

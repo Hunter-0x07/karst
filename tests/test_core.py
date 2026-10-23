@@ -11,6 +11,9 @@ import unittest
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
+# Windows process startup is outside the product's timing assertions. Keep a
+# bounded watchdog while allowing local scheduler/antivirus startup latency.
+PROCESS_TIMEOUT = 30
 sys.path.insert(0, str(ROOT / "src"))
 
 from karst import application
@@ -244,9 +247,9 @@ class CoreTests(unittest.TestCase):
         script = "from karst.store import host_lock; import sys;\nwith host_lock(sys.argv[1]): print('owned')"
         env = dict(os.environ, PYTHONPATH=str(ROOT / "src"))
         with host_lock(self.data):
-            child = subprocess.run([sys.executable, "-c", script, str(self.data)], env=env, capture_output=True, timeout=5)
+            child = subprocess.run([sys.executable, "-c", script, str(self.data)], env=env, capture_output=True, timeout=PROCESS_TIMEOUT)
             self.assertNotEqual(child.returncode, 0)
-        child = subprocess.run([sys.executable, "-c", script, str(self.data)], env=env, capture_output=True, timeout=5)
+        child = subprocess.run([sys.executable, "-c", script, str(self.data)], env=env, capture_output=True, timeout=PROCESS_TIMEOUT)
         self.assertEqual(child.returncode, 0)
 
     def test_reconcile_marks_interrupted_operation_unknown_without_requests(self):
@@ -271,22 +274,23 @@ class CoreTests(unittest.TestCase):
             report = (out / "run.json").read_text(encoding="utf-8")
             self.assertNotIn("body_base64", report)
             cmd = [sys.executable, str(ROOT / "scripts" / "karst.py"), "status", "--data-dir", str(self.data), "--run-id", result["run_id"]]
-            child = subprocess.run(cmd, capture_output=True, timeout=5)
+            child = subprocess.run(cmd, capture_output=True, timeout=PROCESS_TIMEOUT)
             self.assertEqual(child.returncode, 0, child.stderr)
             self.assertEqual(json.loads(child.stdout)["run_id"], result["run_id"])
             self.assertEqual(len(target.seen), 1)
 
-    def test_unimplemented_resume_fails_explicitly(self):
-        child = subprocess.run([sys.executable, str(ROOT / "scripts" / "karst.py"), "resume"], capture_output=True, timeout=5)
+    def test_resume_requires_explicit_launch_and_run_arguments(self):
+        child = subprocess.run([sys.executable, str(ROOT / "scripts" / "karst.py"), "resume"], capture_output=True, timeout=PROCESS_TIMEOUT)
         self.assertEqual(child.returncode, 2)
-        self.assertIn(b"not implemented", child.stderr)
+        self.assertIn(b"--config", child.stderr)
+        self.assertIn(b"--run-id", child.stderr)
 
     def test_model_preflight_only_queries_listing(self):
         with server() as (target, origin):
             path = self.root / "gateway.json"
             path.write_text(json.dumps({"api_base": origin + "/v1", "model": "qwen3.8-27b"}), encoding="utf-8")
             env = {key: value for key, value in os.environ.items() if key != "TESTER_API_KEY"}
-            child = subprocess.run([sys.executable, str(ROOT / "scripts" / "check_model.py"), "--config", str(path)], env=env, capture_output=True, timeout=5)
+            child = subprocess.run([sys.executable, str(ROOT / "scripts" / "check_model.py"), "--config", str(path)], env=env, capture_output=True, timeout=PROCESS_TIMEOUT)
             self.assertEqual(child.returncode, 0, child.stderr)
             self.assertFalse(json.loads(child.stdout)["inference_tested"])
             self.assertEqual(target.seen, [("/v1/models", "anonymous")])

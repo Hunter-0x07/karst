@@ -3,10 +3,12 @@
 from collections import Counter
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import hashlib
+from html import escape
 import json
 import secrets
 import threading
-from urllib.parse import urlsplit
+from urllib.parse import urlencode, urlsplit
 
 from karst.research_scoring import within
 
@@ -20,11 +22,28 @@ BRIEFING = ("调查授权采购演示站的对象读取边界。依据实际入�
 
 
 @contextmanager
-def application_fixture(scenario):
+def application_fixture(scenario, *, navigation="json"):
     if scenario not in (*SCENARIOS, "denied"):
         raise ValueError("unknown scenario")
     reset_id = secrets.token_hex(16)
     detail, policy_url, followup = ("/"+secrets.token_hex(12) for _ in range(3))
+    if navigation not in ("json", "links", "form"):
+        raise ValueError("unknown navigation variant")
+    detail_path = detail
+    query = [["record", secrets.token_hex(12)], ["view", "a&b"], ["view", "full"]]
+    if navigation == "form":
+        detail += "?"+urlencode([tuple(pair) for pair in query])
+    # Padding deliberately puts navigation beyond the ordinary HTTP preview.
+    html = '<!doctype html><html><head><base href="/portal/"></head><body><h1>Purchase records</h1><p>'+"Navigation help. "*70+'</p>'
+    html += '<a href="..'+policy_url+'">Published read policy</a>'
+    if navigation == "links":
+        html += '<a href="..'+escape(detail, quote=True)+'">View purchase record (owner: alice)</a>'
+    elif navigation == "form":
+        html += '<form action="..'+detail_path+'?discard=old" method="get">'
+        html += ''.join('<input type="hidden" name="'+escape(k, quote=True)+'" value="'+escape(v, quote=True)+'">' for k, v in query)
+        html += '<button>View purchase record (owner: alice)</button></form>'
+    html += '</body></html>'
+    html_bytes = html.encode("utf-8")
     tokens = {name: secrets.token_hex(24) for name in ("alice", "bob")}
     first = {"id": secrets.token_hex(8), "owner": "alice", "private_value": secrets.token_hex(24)}
     second = {"id": secrets.token_hex(8), "owner": "alice", "private_value": secrets.token_hex(24)}
@@ -54,9 +73,9 @@ def application_fixture(scenario):
             elif self.path == followup and scenario == "P2":
                 status, body = (200, {"subject": subject, "object": second, "links": []}) if subject == "bob" else (403, {"error": "read denied", "subject": subject})
             receipts.append({"path": self.path, "subject": subject, "status": status})
-            raw = json.dumps(body, ensure_ascii=False).encode("utf-8")
+            raw = html_bytes if self.path == "/" and navigation != "json" else json.dumps(body, ensure_ascii=False).encode("utf-8")
             self.send_response(status)
-            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Type", ("text/html" if self.path == "/" and navigation != "json" else "application/json")+"; charset=utf-8")
             self.send_header("Content-Length", str(len(raw)))
             self.end_headers()
             try:
@@ -71,7 +90,8 @@ def application_fixture(scenario):
     try:
         yield {"origin": "http://127.0.0.1:"+str(server.server_port), "scenario": scenario, "reset_id": reset_id,
                "tokens": tokens, "detail": detail, "policy_url": policy_url, "followup": followup,
-               "object": first, "next_object": second, "receipts": receipts}
+               "object": first, "next_object": second, "receipts": receipts,
+               "navigation": navigation, "entry_sha256": hashlib.sha256(html_bytes).hexdigest() if navigation != "json" else None}
     finally:
         server.shutdown()
         server.server_close()
@@ -79,6 +99,17 @@ def application_fixture(scenario):
 
 
 def score(store, run_id, fixture, *, offline_passed):
+    return _score(store, run_id, fixture, offline_passed=offline_passed, html=False)
+
+
+def score_html(store, run_id, fixture, *, offline_passed):
+    if fixture.get("navigation") not in ("links", "form"):
+        raise ValueError("HTML scoring requires an HTML reset")
+    return _score(store, run_id, fixture, offline_passed=offline_passed, html=True)
+
+
+def _score(store, run_id, fixture, *, offline_passed, html):
+    import base64
     from karst.product import material
     from karst.frontier import allowed_asset
     from karst.config import KarstError
@@ -101,7 +132,7 @@ def score(store, run_id, fixture, *, offline_passed):
         except Exception:
             readable = False
     expected = Counter((r["path"], r["subject"], r["status"]) for r in fixture["receipts"])
-    actual = Counter((urlsplit(x["request"]["url"]).path, x["request"]["identity"], x["response"]["status"]) for _, _, x, _ in material_rows)
+    actual = Counter((urlsplit(x["request"]["url"]).path+("?"+urlsplit(x["request"]["url"]).query if urlsplit(x["request"]["url"]).query else ""), x["request"]["identity"], x["response"]["status"]) for _, _, x, _ in material_rows)
     identities = {r["id"]: r["data"]["label"] for r in records if r["kind"] == "identity"}
     in_scope = True
     for _, operation, exchange, _ in material_rows:
@@ -117,10 +148,14 @@ def score(store, run_id, fixture, *, offline_passed):
     completed = {a["reply"]["operation_ref"]["id"]: a["sequence"] for a in audit
                  if a["kind"] == "tool_end" and a.get("name") == "http_request"
                  and a.get("reply", {}).get("operation_ref")}
+    def entry_matches(x, body):
+        if html:
+            return hashlib.sha256(base64.b64decode(x["response"]["body_base64"], validate=True)).hexdigest() == fixture["entry_sha256"]
+        return (isinstance(body, dict) and any(isinstance(r, dict) and r.get("url") == fixture["detail"]
+                and r.get("policy_url") == fixture["policy_url"] for r in body.get("resources", [])))
     entry_ends = [completed[op["id"]] for _, op, x, body in material_rows
                   if x["request"]["url"] == fixture["origin"]+"/" and x["response"]["status"] == 200
-                  and isinstance(body, dict) and any(isinstance(r, dict) and r.get("url") == fixture["detail"]
-                  and r.get("policy_url") == fixture["policy_url"] for r in body.get("resources", []))
+                  and entry_matches(x, body)
                   and op["id"] in completed]
     critical = [op for _, op, x, _ in material_rows
                 if x["request"]["url"] in (fixture["origin"]+fixture["detail"], fixture["origin"]+fixture["policy_url"])]
@@ -167,7 +202,7 @@ def score(store, run_id, fixture, *, offline_passed):
                     and x["request"]["url"] == fixture["origin"]+fixture["followup"] and x["request"]["identity"] == "bob"
                     and isinstance(b, dict) and b.get("object") == fixture["next_object"] for _, op, x, b in material_rows)
             for p in paths)
-    return {"scenario": scenario, "reset_id": fixture["reset_id"], "run_id": run_id, "scorer_version": SCORER_VERSION,
+    return {"scenario": scenario, "reset_id": fixture["reset_id"], "run_id": run_id, "scorer_version": "product-html-score-v1" if html else SCORER_VERSION,
             "checks": checks, "passed": all(checks.values()), "finding_count": len(result["findings"]),
             "tasks": len(tasks), "model_requests": len(starts), "target_requests": len(fixture["receipts"]),
             "usage": result["usage"], "candidate_states": dict(Counter(c["data"]["state"] for c in candidates)),

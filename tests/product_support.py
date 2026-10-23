@@ -1,6 +1,7 @@
 """Deterministic model uses exclusively the same visible context and tool replies."""
 
 import json
+from urllib.parse import urlencode, parse_qsl, urlsplit, urlunsplit
 
 from karst.frontier import METHOD
 from tests.i0_support import observation, tool_reply
@@ -12,7 +13,9 @@ def product_model(payload, *, false_candidate=False):
     identities = {i["label"]: i["identity_ref"] for i in context["identities"]}
     origin = context["entrypoints"][0].rstrip("/")
     def get(key, url, identity=None):
-        return key, "http_request", {"url": url, "identity_ref": identity, "query": []}
+        p = urlsplit(url)
+        return key, "http_request", {"url": urlunsplit((p.scheme, p.netloc, p.path, "", "")), "identity_ref": identity,
+                                      "query": [list(pair) for pair in parse_qsl(p.query, keep_blank_values=True)]}
     if context["role"] == "verify":
         candidate = next(r for r in context["read_set"] if r["kind"] == "candidate")
         rule = next(r for r in context["read_set"] if r["kind"] == "security_rule")
@@ -43,17 +46,33 @@ def product_model(payload, *, false_candidate=False):
         capability = next(r for r in context["read_set"] if r["kind"] == "capability")
         if "follow" not in replies:
             return tool_reply([get("follow", targets[0]["data"]["locator"]["url"], capability["data"]["subject_ref"])])
-        return tool_reply([("final", "submit_result", observation("Actual dependent resource read", replies["follow"]["evidence_refs"]))])
+        final = observation("Actual dependent resource read", replies["follow"]["evidence_refs"])
+        final["proposed_records"].append({"local_ref": "unknown-rule", "kind": "hypothesis", "data": {
+            "question": "Which read rule applies to the newly exposed resource?", "basis_refs": replies["follow"]["evidence_refs"],
+            "alternative_explanations": ["Access may be permitted or denied"], "missing_conditions": ["Explicit applicable read policy"]}})
+        return tool_reply([("final", "submit_result", final)])
     if "entry" not in replies:
         return tool_reply([get("entry", origin+"/")])
-    navigation = json.loads(replies["entry"]["preview"]["body_text"])["resources"][0]
+    try:
+        navigation = json.loads(replies["entry"]["preview"]["body_text"])["resources"][0]
+    except json.JSONDecodeError:
+        if "navigation" not in replies:
+            return tool_reply([("navigation", "document_inspect", {"evidence_ref": replies["entry"]["evidence_refs"][0]})])
+        parsed = replies["navigation"]
+        if parsed["forms"]:
+            form = parsed["forms"][0]
+            detail = form["url"]+"?"+urlencode([tuple(pair) for pair in form["query"]])
+            policy_url = parsed["links"][0]["url"]
+        else:
+            policy_url, detail = [link["url"] for link in parsed["links"]]
+        navigation = {"url": detail[len(origin):], "policy_url": policy_url[len(origin):]}
     if "policy" not in replies:
         return tool_reply([get("policy", origin+navigation["policy_url"]), get("owner", origin+navigation["url"], identities["alice"]), get("reader", origin+navigation["url"], identities["bob"])])
     if "publish" not in replies:
         root_evidence = replies["entry"]["evidence_refs"]
         proposal = observation("Compared owner and managed reader with the published policy", replies["owner"]["evidence_refs"]+replies["reader"]["evidence_refs"])
         proposal["proposed_records"].append({"local_ref": "resource", "kind": "asset", "data": {"asset_type": "web_resource",
-            "locator": {"url": origin+navigation["url"]}, "parent_refs": [], "provenance_refs": root_evidence}})
+            "locator": {"url": replies["reader"].get("request_url") or origin+navigation["url"]}, "parent_refs": [], "provenance_refs": root_evidence}})
         policy = json.loads(replies["policy"]["preview"]["body_text"])
         if "access_policy" in policy:
             proposal["proposed_records"].append({"local_ref": "rule", "kind": "security_rule", "data": {"statement": "Published explicit object read policy",
@@ -65,7 +84,7 @@ def product_model(payload, *, false_candidate=False):
                     "counterevidence_refs": [], "required_conditions": [], "alternative_explanations": ["Explicit sharing may permit access"], "missing_conditions": []}})
         else:
             proposal["proposed_records"].append({"local_ref": "unknown", "kind": "hypothesis", "data": {"question": "What sharing policy applies?",
-                "basis_refs": replies["policy"]["evidence_refs"], "alternative_explanations": ["Access may be permitted or denied"], "missing_conditions": ["Explicit policy"]}})
+                "basis_refs": replies["policy"]["evidence_refs"]+replies["owner"]["evidence_refs"], "alternative_explanations": ["Access may be permitted or denied"], "missing_conditions": ["Explicit policy"]}})
         reader = json.loads(replies["reader"]["preview"]["body_text"])
         links = reader.get("links", [])
         if links:

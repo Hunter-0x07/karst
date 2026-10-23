@@ -9,6 +9,7 @@ from urllib.parse import urlsplit
 from karst.config import KarstError, exact, parse_config, parse_url, positive, strict_json
 
 TOOLS = {"http_request": "http.request", "evidence_read": "evidence.read",
+         "document_inspect": "document.inspect",
          "session_inspect": "session.inspect", "state_query": "state.query",
          "publish_research": "research.publish", "submit_result": "research.submit_result"}
 BUDGET_KEYS = "model_requests input_tokens output_tokens http_requests network_connections network_bytes tool_starts wall_seconds cost_limit".split()
@@ -17,7 +18,7 @@ PROFILE = {"mode": "live", "model_config_ref": "config:i0-gateway-v1",
            "dependency_lock_ref": "lock:stdlib-3.12-v1", "policy_version": "i0-v1"}
 RESEARCH_PROFILE = dict(PROFILE, tool_profile_ref="registry:research-get-v1",
                         support_matrix_ref="support:research-v1", policy_version="research-v1")
-PRODUCT_PROFILE = dict(RESEARCH_PROFILE, tool_profile_ref="registry:product-get-v2",
+PRODUCT_PROFILE = dict(RESEARCH_PROFILE, tool_profile_ref="registry:product-get-v5",
                        support_matrix_ref="support:product-v1", policy_version="product-v2", model_config_ref="config:product-gateway-v1")
 EXECUTION = {"allowed_cidrs": ["127.0.0.1/32"], "denied_cidrs": [], "http_timeout_seconds": 10,
              "max_response_bytes": 65536, "max_redirects": 2, "preview_bytes": 768,
